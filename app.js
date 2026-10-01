@@ -3,7 +3,8 @@
 // can be positioned directly above it.
 
 const $ = (id) => document.getElementById(id);
-const MARKER_ID = 424242;
+const MARKER_COLOR = { r: 255, g: 20, b: 147, a: 255 }; // pink (0–255 per channel)
+let markerId = null; // id the viewer assigns to our COG point markup
 const MAX_OBJECTS = 1000;
 
 let API = null;
@@ -147,18 +148,25 @@ function renderElements() {
 // ---------- actions ----------
 async function showMarker() {
   if (!result?.cog) return log("Nothing to mark yet.");
-  await API.viewer.removeIcon({ id: MARKER_ID }).catch(() => {});
-  await API.viewer.addIcon({
-    id: MARKER_ID,
-    iconPath: new URL("cog.svg", location.href).href,
-    position: result.cog, // metres
-    size: 32,
-  });
-  log(`Marker placed at ${f(result.cog.x)}, ${f(result.cog.y)}, ${f(result.cog.z)} m`);
+  await clearMarker();
+  // Single point measurement markup (same as the viewer's Measure → Single point tool).
+  // MarkupPick positions are in millimetres; result.cog is in metres.
+  const [markup] = await API.markup.addSinglePointMarkups([{
+    color: MARKER_COLOR,
+    start: {
+      positionX: result.cog.x * 1000,
+      positionY: result.cog.y * 1000,
+      positionZ: result.cog.z * 1000,
+    },
+  }]);
+  markerId = markup?.id ?? null;
+  log(`COG point placed at ${f(result.cog.x)}, ${f(result.cog.y)}, ${f(result.cog.z)} m`);
 }
 
 async function clearMarker() {
-  await API.viewer.removeIcon({ id: MARKER_ID }).catch(() => {});
+  // Only removes our own COG point – the user's other measurements are left alone.
+  if (markerId != null) await API.markup.removeMarkups([markerId]).catch(() => {});
+  markerId = null;
 }
 
 async function fit() {
