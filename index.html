@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lift COG</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Lift COG</h1>
+    <div id="status" class="status pending">Connecting…</div>
+  </header>
+
+  <div class="warning">Estimate only. Confirm weights and lifting points against the lift plan before any lift.</div>
+
+  <section>
+    <h2>Combined centre of gravity</h2>
+    <div id="result" class="muted">Select the elements that will be lifted together.</div>
+    <div class="row">
+      <button id="btnMarker">Show marker</button>
+      <button id="btnFit">Fit to selection</button>
+      <button id="btnCopy" class="secondary">Copy result</button>
+      <button id="btnClear" class="secondary">Clear marker</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Settings</h2>
+    <label class="field">Density for volume-based weights (kg/m³)
+      <input type="number" id="density" value="7850" min="0" step="10" />
+    </label>
+    <label class="field">Viewer coordinate units
+      <select id="units">
+        <option value="1" selected>metres</option>
+        <option value="0.001">millimetres</option>
+      </select>
+    </label>
+    <p class="hint">If the marker lands far away from the selection, switch the units.</p>
+  </section>
+
+  <section>
+    <h2>Elements <span id="selCount" class="badge">0</span></h2>
+    <div id="elements" class="muted">Nothing selected.</div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </section>
+
+  <script src="cog.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

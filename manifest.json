@@ -1,0 +1,10 @@
+{
+  "url": "https://YOUR-HOST.example.com/tc-extension/index.html",
+  "title": "Lift COG",
+  "icon": "https://YOUR-HOST.example.com/tc-extension/icon.svg",
+  "infoUrl": "https://YOUR-HOST.example.com/tc-extension/README.md",
+  "description": "Combined centre of gravity of selected elements, for planning crane lifts",
+  "extensionType": [
+    "3dviewer"
+  ]
+}
