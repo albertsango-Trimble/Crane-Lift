@@ -1,260 +1,157 @@
-// Centre-of-gravity maths – no viewer dependencies, so it can be unit-tested in Node.
-// Property units per Workspace API PropertyType: LengthMeasure(0)=mm, VolumeMeasure(2)=m3, MassMeasure(3)=kg.
-(function (root) {
-  const PT = { Length: 0, Volume: 2, Mass: 3 };
+// Quick checks for cog.js — run: node test-cog.js
+const C = require("./cog.js");
+const assert = require("assert");
 
-  const num = (v) => {
-    const n = typeof v === "number" ? v : parseFloat(String(v).replace(",", "."));
-    return Number.isFinite(n) ? n : null;
-  };
+const obj = (sets) => ({ properties: sets.map(([name, props]) => ({ name, properties: props.map(([n, v, t]) => ({ name: n, value: v, type: t })) })) });
+const box = (a, b) => ({ min: { x: a[0], y: a[1], z: a[2] }, max: { x: b[0], y: b[1], z: b[2] } });
 
-  // Flatten property sets into [{set, name, value, type}]
-  function flatten(obj) {
-    const out = [];
-    for (const set of obj?.properties || []) {
-      for (const p of set.properties || []) out.push({ set: set.name, name: p.name, value: p.value, type: p.type });
-    }
-    return out;
-  }
+// Mass: prefer gross weight
+let m = C.findMass(obj([["Tekla", [["WEIGHT_NET", 90, 3], ["WEIGHT_GROSS", 100, 3], ["WEIGHT_PER_METRE", 5, 3]]]]), 7850);
+assert.strictEqual(m.kg, 100);
 
-  // Lifting should use the heaviest credible figure, so gross beats plain beats net.
-  const rank = (name) => (/gross/i.test(name) ? 3 : /net/i.test(name) ? 1 : 2);
+// Mass: fall back to volume × density
+m = C.findMass(obj([["Qto", [["NetVolume", 0.01, 2], ["GrossVolume", 0.012, 2]]]]), 7850);
+assert.ok(Math.abs(m.kg - 94.2) < 1e-9, m.kg);
 
-  function best(candidates) {
-    candidates.sort((a, b) => rank(b.name) - rank(a.name) || b.value - a.value);
-    return candidates[0] || null;
-  }
+// No mass
+assert.strictEqual(C.findMass(obj([["X", [["Name", "B1", 5]]]]), 7850).kg, null);
 
-  /** Mass in kg: weight/mass property first, else volume × density. */
-  function findMass(obj, densityKgM3) {
-    const props = flatten(obj);
-    const massProps = props
-      .filter((p) => /(weight|mass)/i.test(p.name) && !/(per|\/)/i.test(p.name)) // skip "weight per metre"
-      .map((p) => ({ ...p, value: num(p.value) }))
-      .filter((p) => p.value !== null && p.value > 0 && (p.type === PT.Mass || p.type === undefined));
-    const m = best(massProps);
-    if (m) {
-      return { kg: m.value, source: `${m.set} › ${m.name}` + (m.type === undefined ? " (assumed kg)" : "") };
-    }
-    const volProps = props
-      .filter((p) => /volume/i.test(p.name) && p.type === PT.Volume)
-      .map((p) => ({ ...p, value: num(p.value) }))
-      .filter((p) => p.value !== null && p.value > 0);
-    const v = best(volProps);
-    if (v && densityKgM3 > 0) {
-      return { kg: v.value * densityKgM3, source: `${v.set} › ${v.name} × ${densityKgM3} kg/m³` };
-    }
-    return { kg: null, source: "No weight or volume found" };
-  }
+// COG property in mm → m, accepted when inside box
+const withCog = obj([["Tekla", [["COG_X", 1500, 0], ["COG_Y", 200, 0], ["COG_Z", 3000, 0]]]]);
+let c = C.findCentre(withCog, box([1, 0, 2], [2, 1, 4]));
+assert.deepStrictEqual(c.point, { x: 1.5, y: 0.2, z: 3 });
+assert.strictEqual(c.approximate, false);
 
-  /** COG from model properties (e.g. Tekla COG_X/Y/Z), LengthMeasure in mm → metres. */
-  function findCogProperty(obj) {
-    const props = flatten(obj).filter((p) => p.type === PT.Length);
-    const axis = {};
-    for (const p of props) {
-      const m = /(?:^|[^a-z])(?:cog|cent(?:er|re)[ _-]?of[ _-]?gravity)[ _-]?([xyz])$/i.exec(p.name);
-      const val = num(p.value);
-      if (m && val !== null) axis[m[1].toLowerCase()] = val / 1000;
-    }
-    return "x" in axis && "y" in axis && "z" in axis ? { x: axis.x, y: axis.y, z: axis.z } : null;
-  }
+// COG property outside box → rejected, box centre used
+c = C.findCentre(withCog, box([10, 10, 10], [12, 12, 12]));
+assert.deepStrictEqual(c.point, { x: 11, y: 11, z: 11 });
+assert.ok(c.approximate);
 
-  function scaleBox(box, s) {
-    return {
-      min: { x: box.min.x * s, y: box.min.y * s, z: box.min.z * s },
-      max: { x: box.max.x * s, y: box.max.y * s, z: box.max.z * s },
-    };
-  }
+// Combined COG: 100 kg at x=0, 300 kg at x=4 → x=3
+const r = C.combine([
+  { kg: 100, point: { x: 0, y: 0, z: 0 } },
+  { kg: 300, point: { x: 4, y: 0, z: 2 } },
+  { kg: null, point: { x: 99, y: 99, z: 99 } },
+]);
+assert.strictEqual(r.totalKg, 400);
+assert.deepStrictEqual(r.cog, { x: 3, y: 0, z: 1.5 });
+assert.strictEqual(r.used, 2);
+assert.strictEqual(r.excluded, 1);
 
-  const boxCentre = (b) => ({ x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2, z: (b.min.z + b.max.z) / 2 });
+// Unit scaling mm → m
+assert.deepStrictEqual(C.scaleBox(box([1000, 0, 0], [2000, 500, 0]), 0.001), box([1, 0, 0], [2, 0.5, 0]));
 
-  function inside(p, b, tol) {
-    return ["x", "y", "z"].every((k) => p[k] >= b.min[k] - tol && p[k] <= b.max[k] + tol);
-  }
+console.log("All COG tests passed");
 
-  /** Per-object centroid: model COG property if it sits inside the object's box, else box centre. */
-  function findCentre(obj, box) {
-    const prop = findCogProperty(obj);
-    if (prop && box) {
-      if (inside(prop, box, 0.05)) return { point: prop, source: "COG property", approximate: false };
-      return { point: boxCentre(box), source: "Box centre (COG property outside object – ignored)", approximate: true };
-    }
-    if (prop && !box) return { point: prop, source: "COG property", approximate: false };
-    if (box) return { point: boxCentre(box), source: "Box centre", approximate: true };
-    return { point: null, source: "No geometry", approximate: true };
-  }
+// ================= Lifting points =================
+const near = (a, b, t = 1e-6) => Math.abs(a - b) <= t;
 
-  /** items: [{kg, point}] → { totalKg, cog, used, excluded } */
-  function combine(items) {
-    let M = 0, x = 0, y = 0, z = 0, used = 0, excluded = 0;
-    for (const it of items) {
-      if (!(it.kg > 0) || !it.point) { excluded++; continue; }
-      M += it.kg; x += it.kg * it.point.x; y += it.kg * it.point.y; z += it.kg * it.point.z; used++;
-    }
-    return { totalKg: M, cog: M > 0 ? { x: x / M, y: y / M, z: z / M } : null, used, excluded };
-  }
+// Beam like the screenshot: 6.03 m along X, 0.2 wide, 0.204 high, 278.4 kg, COG in the middle
+const beam = box([0, 0, 0], [6.03, 0.2, 0.204]);
+const bc = { x: 3.015, y: 0.1, z: 0.102 };
 
-  function unionBox(boxes) {
-    const bs = boxes.filter(Boolean);
-    if (!bs.length) return null;
-    const min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity };
-    for (const b of bs) for (const k of ["x", "y", "z"]) {
-      min[k] = Math.min(min[k], b.min[k]); max[k] = Math.max(max[k], b.max[k]);
-    }
-    return { min, max };
-  }
+// 2 points: 0.207L from each end, on top flange, 50/50
+let plan = C.planLiftPoints({ cog: bc, boxes: [beam], n: 2 });
+assert.strictEqual(plan.layout, "line");
+assert.ok(near(plan.points[0].x, 0.2071 * 6.03, 1e-3) && near(plan.points[1].x, 6.03 - 0.2071 * 6.03, 1e-3), JSON.stringify(plan.points));
+assert.ok(plan.points.every((p) => p.z === 0.204 && near(p.y, 0.1)));
+let sh = C.loadShares(plan.points, bc, 278.4);
+assert.ok(sh.stable && sh.determinate);
+assert.ok(sh.kg.every((v) => near(v, 139.2, 1e-6)), sh.kg);
 
-  // ======================= Lifting points =======================
-  // All coordinates in metres. Plan = X/Y, Z up. Layout is aligned to the longer plan
-  // axis of the selection's (axis-aligned) bounding box.
+// 1 point: directly over COG, on top
+plan = C.planLiftPoints({ cog: bc, boxes: [beam], n: 1 });
+assert.ok(near(plan.points[0].x, 3.015) && plan.points[0].z === 0.204);
+assert.deepStrictEqual(C.loadShares(plan.points, bc, 278.4).kg, [278.4]);
 
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-  const inPlan = (p, b, tol) => p.x >= b.min.x - tol && p.x <= b.max.x + tol && p.y >= b.min.y - tol && p.y <= b.max.y + tol;
-  const planDist = (p, b) => Math.hypot(Math.max(b.min.x - p.x, 0, p.x - b.max.x), Math.max(b.min.y - p.y, 0, p.y - b.max.y));
+// 4 points on a narrow beam → auto falls back to a line, flagged indeterminate, equal shares
+plan = C.planLiftPoints({ cog: bc, boxes: [beam], n: 4 });
+assert.strictEqual(plan.layout, "line");
+sh = C.loadShares(plan.points, bc, 278.4);
+assert.ok(sh.stable && !sh.determinate);
+assert.ok(sh.kg.every((v) => near(v, 69.6, 1e-6)), sh.kg);
 
-  // Evenly spaced offsets symmetric about 0. For 2 points use the 0.207L-from-ends rule
-  // (minimises bending in a uniform beam); otherwise one bay per point with half-bay overhangs.
-  function rowOffsets(count, length, room) {
-    if (count === 1) return [0];
-    const half = count === 2 ? (0.5 - 0.2071) * length : (length / count) * (count - 1) / 2;
-    const h = Math.max(0, Math.min(half, room));
-    return Array.from({ length: count }, (_, i) => -h + (2 * h * i) / (count - 1));
-  }
+// Off-centre COG on a beam: 2 points stay symmetric about the COG → still 50/50
+const offC = { x: 1.5, y: 0.1, z: 0.1 };
+plan = C.planLiftPoints({ cog: offC, boxes: [beam], n: 2 });
+assert.ok(near((plan.points[0].x + plan.points[1].x) / 2, 1.5, 1e-9));
+assert.ok(plan.points[0].x >= 0.05);
+assert.ok(C.loadShares(plan.points, offC, 100).kg.every((v) => near(v, 50)));
 
-  /**
-   * Proposes N lifting points arranged symmetrically about the COG (equal loads on a rigid body),
-   * then drops each one onto the top of the element underneath it.
-   * opts: { cog, boxes: Box[], n, layout: "auto"|"line"|"area" }
-   */
-  function planLiftPoints({ cog, boxes, n, layout = "auto" }) {
-    const bs = boxes.filter(Boolean);
-    const ub = unionBox(bs);
-    if (!ub || !cog || !(n >= 1)) return null;
+// Wide panel 4 × 3 m: 4 points as a rectangle, 3 points as a triangle, both equal & determinate for 3
+const panel = box([0, 0, 0], [4, 3, 0.2]);
+const pc = { x: 2, y: 1.5, z: 0.1 };
+plan = C.planLiftPoints({ cog: pc, boxes: [panel], n: 4 });
+assert.strictEqual(plan.layout, "area");
+assert.strictEqual(plan.points.length, 4);
+sh = C.loadShares(plan.points, pc, 1000);
+assert.ok(sh.kg.every((v) => near(v, 250)), sh.kg);
+plan = C.planLiftPoints({ cog: pc, boxes: [panel], n: 3 });
+sh = C.loadShares(plan.points, pc, 900);
+assert.ok(sh.determinate && sh.stable && sh.kg.every((v) => near(v, 300, 1e-6)), JSON.stringify(sh));
+const cx = plan.points.reduce((a, p) => a + p.x, 0) / 3, cy = plan.points.reduce((a, p) => a + p.y, 0) / 3;
+assert.ok(near(cx, 2) && near(cy, 1.5)); // triangle centroid on COG
 
-    const Lx = ub.max.x - ub.min.x, Ly = ub.max.y - ub.min.y;
-    const U = Lx >= Ly ? "x" : "y", V = U === "x" ? "y" : "x";
-    const Lu = ub.max[U] - ub.min[U], Lv = ub.max[V] - ub.min[V];
-    const uc = cog[U], vc = cog[V];
-    const mu = Math.max(0.05, 0.02 * Lu), mv = Math.max(0.05, 0.05 * Lv); // keep clear of edges
-    const roomU = Math.max(0, Math.min(uc - ub.min[U], ub.max[U] - uc) - mu);
-    const roomV = Math.max(0, Math.min(vc - ub.min[V], ub.max[V] - vc) - mv);
+// Unequal points: 2 points at x=0 and x=4, COG at x=1 → 75% / 25%
+sh = C.loadShares([{ x: 0, y: 0, z: 0 }, { x: 4, y: 0, z: 0 }], { x: 1, y: 0, z: 0 }, 100);
+assert.ok(near(sh.kg[0], 75) && near(sh.kg[1], 25), sh.kg);
 
-    let used = n === 1 ? "single" : n === 2 ? "line" : layout === "auto" ? (Lv >= 0.25 * Lu && roomV > 0.1 ? "area" : "line") : layout;
-    const notes = [];
-    if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Selection is too narrow to spread points across its width – placed in a line instead."); }
+// COG outside points → unstable
+sh = C.loadShares([{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }], { x: 2, y: 0, z: 0 }, 100);
+assert.strictEqual(sh.stable, false);
+// COG off the line of points → unstable (load will roll)
+sh = C.loadShares([{ x: 0, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }], { x: 1, y: 0.3, z: 0 }, 100);
+assert.strictEqual(sh.stable, false);
 
-    let uv = [];
-    if (used === "single") uv = [[0, 0]];
-    else if (used === "line") uv = rowOffsets(n, Lu, roomU).map((du) => [du, 0]);
-    else if (n === 3) {
-      // Isosceles triangle with its centroid on the COG: two points behind, apex in front (more room side).
-      const s = ub.max[U] - uc >= uc - ub.min[U] ? 1 : -1;
-      const back = s > 0 ? uc - ub.min[U] - mu : ub.max[U] - uc - mu;
-      const front = s > 0 ? ub.max[U] - uc - mu : uc - ub.min[U] - mu;
-      const p = Math.max(0, Math.min(0.25 * Lu, back, front / 2));
-      const q = Math.min(0.2929 * Lv, roomV);
-      uv = [[-s * p, -q], [-s * p, q], [2 * s * p, 0]];
-    } else {
-      // Two rows either side of the COG (4 → 2×2, 6 → 2×3, 8 → 2×4).
-      const cols = rowOffsets(Math.ceil(n / 2), Lu, roomU);
-      const dv = Math.min(0.2929 * Lv, roomV);
-      for (const du of cols) uv.push([du, -dv], [du, dv]);
-    }
+// Two separate beams with a gap; 2 points must land on steel, not in the gap
+const b1 = box([0, 0, 0], [2, 0.2, 0.3]), b2 = box([3, 0, 0], [5, 0.2, 0.5]);
+plan = C.planLiftPoints({ cog: { x: 2.5, y: 0.1, z: 0.2 }, boxes: [b1, b2], n: 2 });
+for (const p of plan.points) assert.ok([b1, b2].some((b) => p.x >= b.min.x && p.x <= b.max.x), JSON.stringify(p));
+assert.strictEqual(plan.points[1].z, 0.5); // top of the taller beam
 
-    const points = uv.map(([du, dv], i) => {
-      let p = { [U]: uc + du, [V]: vc + dv };
-      let snapped = false;
-      let hits = bs.filter((b) => inPlan(p, b, 0.001));
-      if (!hits.length) {
-        // Gap between elements – move the point onto the nearest element.
-        const near = bs.reduce((a, b) => (planDist(p, b) < planDist(p, a) ? b : a));
-        p = { x: clamp(p.x, near.min.x, near.max.x), y: clamp(p.y, near.min.y, near.max.y) };
-        hits = [near]; snapped = true;
-      }
-      const z = Math.max(...hits.map((b) => b.max.z)); // top surface
-      return { label: `P${i + 1}`, x: p.x, y: p.y, z, snapped };
-    });
-    if (points.some((p) => p.snapped)) notes.push("Some points fell in a gap between elements and were moved onto the nearest element – loads recalculated.");
-    return { points, layout: used, axis: U, notes };
-  }
+// Slings: 2 points 3 m apart, hook 2 m above → 53.1° from horizontal, tension = share × len / height
+const sl = C.slings([{ x: -1.5, y: 0, z: 0 }, { x: 1.5, y: 0, z: 0 }], { x: 0, y: 0, z: 0 }, 2, [50, 50]);
+assert.ok(near(sl.legs[0].length, 2.5) && near(sl.legs[0].tensionKg, 62.5) && near(sl.legs[0].angleFromHorizontal, 53.1301, 1e-3));
 
-  // Solve small dense system (Gaussian elimination, partial pivoting). Returns null if singular.
-  function solve(M, b) {
-    const n = b.length, A = M.map((r, i) => [...r, b[i]]);
-    for (let c = 0; c < n; c++) {
-      let piv = c;
-      for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
-      if (Math.abs(A[piv][c]) < 1e-12) return null;
-      [A[c], A[piv]] = [A[piv], A[c]];
-      for (let r = 0; r < n; r++) if (r !== c) {
-        const k = A[r][c] / A[c][c];
-        for (let j = c; j <= n; j++) A[r][j] -= k * A[c][j];
-      }
-    }
-    return A.map((r, i) => r[n] / r[i]);
-  }
+// ================= Sloped / skewed member (like the 24.9 t element) =================
+// Top-surface line runs from A (high end) to B (low end), skewed in plan.
+const A = { x: 100, y: 50.2, z: 26.04 }, B = { x: 117.3, y: 53.1, z: 20.64 };
+const slopedBox = box([99.9, 50.0, 20.37], [117.47, 53.33, 26.04]);
+const flags = C.looksSloped(slopedBox);
+assert.ok(flags.sloped, "sloped member should be flagged");
+assert.ok(!C.looksSloped(beam).sloped && !C.looksSloped(beam).skewed, "flat beam must not be flagged");
+assert.ok(!C.looksSloped(panel).sloped && !C.looksSloped(panel).skewed, "flat panel must not be flagged");
 
-  /**
-   * Vertical load at each point for a rigid load hanging with the hook over the COG.
-   * Uses the minimum-norm (most even) solution of the equilibrium equations, which is exact
-   * for 1, 2 and 3 non-collinear points and an even-sharing assumption beyond that.
-   */
-  function loadShares(points, cog, W) {
-    const n = points.length, tol = 0.005; // 5 mm
-    const res = { kg: [], stable: true, determinate: true, offset: 0 };
-    if (!n || !(W > 0)) return res;
-    const dx = points.map((p) => p.x - cog.x), dy = points.map((p) => p.y - cog.y);
+// COG: middle of the member, 0.25 m below its top line, slightly off the traced line in plan.
+const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2, z: (A.z + B.z) / 2 - 0.25 };
+const sCog = { x: mid.x + 0.03, y: mid.y - 0.02, z: mid.z };
+plan = C.planOnAxis({ cog: sCog, a: A, b: B, boxes: [slopedBox], n: 2 });
+assert.ok(!plan.error, plan.error);
+assert.strictEqual(plan.layout, "line");
+// Points sit on the traced top line (height follows the slope) – not on the box top
+const zOnLine = (p) => { // height of the top line at this plan position
+  const L = Math.hypot(B.x - A.x, B.y - A.y); const t = ((p.x - A.x) * (B.x - A.x) + (p.y - A.y) * (B.y - A.y)) / (L * L);
+  return A.z + t * (B.z - A.z);
+};
+for (const p of plan.points) assert.ok(near(p.z, zOnLine(p), 1e-6), `z ${p.z} vs line ${zOnLine(p)}`);
+assert.ok(plan.points[0].z < 26.04 - 0.5 || plan.points[1].z < 26.04 - 0.5, "at least one point well below the box top");
+// Equal loads and stable
+sh = C.loadShares(plan.points, sCog, 24900);
+assert.ok(sh.stable, JSON.stringify(sh)); assert.ok(sh.kg.every((v) => near(v, 12450, 1e-6)), sh.kg);
+// Spacing ≈ 2 × 0.293 × member length (box-clipped length, ≥ traced length)
+const sp = Math.hypot(plan.points[1].x - plan.points[0].x, plan.points[1].y - plan.points[0].y, plan.points[1].z - plan.points[0].z);
+assert.ok(sp > 2 * 0.29 * Math.hypot(B.x - A.x, B.y - A.y, B.z - A.z) * 0.99, `spacing ${sp}`);
+assert.ok(plan.slopeDeg > 15 && plan.slopeDeg < 20, plan.slopeDeg);
+// Same result whichever end is clicked first
+const planRev = C.planOnAxis({ cog: sCog, a: B, b: A, boxes: [slopedBox], n: 2 });
+const key = (pl) => pl.points.map((p) => [p.x, p.y, p.z].map((v) => v.toFixed(4)).join()).sort().join("|");
+assert.strictEqual(key(planRev), key(plan));
+// Bad traces
+assert.ok(C.planOnAxis({ cog: sCog, a: A, b: { ...A, x: A.x + 0.05 }, boxes: [slopedBox], n: 2 }).error);
+assert.ok(C.planOnAxis({ cog: sCog, a: A, b: { ...A, z: A.z - 3 }, boxes: [slopedBox], n: 2 }).error);
+// 4 points along a traced member: all on the line, equal shares
+plan = C.planOnAxis({ cog: sCog, a: A, b: B, boxes: [slopedBox], n: 4, layout: "line" });
+for (const p of plan.points) assert.ok(near(p.z, zOnLine(p), 1e-6));
+assert.ok(C.loadShares(plan.points, sCog, 24900).kg.every((v) => near(v, 6225, 1e-6)));
 
-    if (n === 1) {
-      res.offset = Math.hypot(dx[0], dy[0]);
-      res.stable = res.offset <= Math.max(tol, 0.01);
-      res.kg = [W];
-      return res;
-    }
-
-    // Are the points (nearly) on one line? Principal axis of the plan positions.
-    const mx = dx.reduce((a, b) => a + b) / n, my = dy.reduce((a, b) => a + b) / n;
-    let sxx = 0, syy = 0, sxy = 0;
-    for (let i = 0; i < n; i++) { const a = dx[i] - mx, b = dy[i] - my; sxx += a * a; syy += b * b; sxy += a * b; }
-    const tr = sxx + syy, det = sxx * syy - sxy * sxy;
-    const l1 = tr / 2 + Math.sqrt(Math.max(0, (tr * tr) / 4 - det)), l2 = tr - l1;
-    const collinear = l2 <= 1e-6 * Math.max(l1, 1e-12) || n === 2;
-
-    let rows;
-    if (collinear) {
-      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
-      const ux = Math.cos(ang), uy = Math.sin(ang);
-      res.offset = Math.abs(-mx * uy + my * ux); // COG distance from the line of points
-      if (res.offset > tol) res.stable = false;
-      rows = [points.map(() => 1), dx.map((x, i) => x * ux + dy[i] * uy)];
-      if (n > 2) res.determinate = false;
-    } else {
-      rows = [points.map(() => 1), dx, dy];
-      if (n > 3) res.determinate = false;
-    }
-    const b = [W, ...rows.slice(1).map(() => 0)];
-    const M = rows.map((r) => rows.map((s) => r.reduce((acc, v, i) => acc + v * s[i], 0)));
-    const lam = solve(M, b);
-    if (!lam) { res.stable = false; res.kg = points.map(() => W / n); return res; }
-    res.kg = points.map((_, i) => rows.reduce((acc, r, k) => acc + r[i] * lam[k], 0));
-    if (res.kg.some((v) => v < -1e-6 * W)) res.stable = false; // COG outside the lifting points
-    return res;
-  }
-
-  /** Sling geometry for a single hook directly above the COG, `height` metres above the highest point. */
-  function slings(points, cog, height, kgShares) {
-    if (!(height > 0) || !points.length) return null;
-    const hook = { x: cog.x, y: cog.y, z: Math.max(...points.map((p) => p.z)) + height };
-    const legs = points.map((p, i) => {
-      const h = Math.hypot(hook.x - p.x, hook.y - p.y), v = hook.z - p.z;
-      const len = Math.hypot(h, v);
-      const fromHorizontal = (Math.atan2(v, h) * 180) / Math.PI;
-      return { length: len, angleFromHorizontal: fromHorizontal, tensionKg: v > 0 ? (kgShares[i] * len) / v : Infinity };
-    });
-    return { hook, legs };
-  }
-
-  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, loadShares, slings };
-  if (typeof module !== "undefined" && module.exports) module.exports = api;
-  else root.COG = api;
-})(this);
+console.log("All lifting-point tests passed");
