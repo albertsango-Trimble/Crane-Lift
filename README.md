@@ -8,8 +8,9 @@ Works out the **combined centre of gravity (COG)** of the elements selected in t
 1. Open the model in the 3D Viewer and open the **Lift COG** panel.
 2. Select every element that will be lifted together (Ctrl/Shift-click, or select an assembly).
 3. The panel shows the total weight and COG X / Y / Z in metres (model coordinates).
-4. **Show marker** drops a red and white target at the COG in the 3D view.
-5. **Copy result** copies a summary and per-element table (paste into Excel or the lift plan).
+4. **Show marker** places a pink **single point measurement** at the COG in the 3D view (the same markup as Measure → Single point, so it shows the coordinates and appears in the measurement list). **Clear marker** removes only that point, not your other measurements.
+5. **Lifting points:** choose 1, 2, 3, 4, 6 or 8 points and a layout, then **Show lifting points**. Blue single-point markups appear on top of the elements, labelled with the load each one carries. They update automatically when you change the selection or settings. **Clear lifting points** removes them.
+6. **Copy result** copies a summary, the per-element table and the lifting points (paste into Excel or the lift plan).
 
 ## How it calculates
 Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
@@ -24,10 +25,23 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 1. COG properties in the model, if present, such as Tekla `COG_X / COG_Y / COG_Z`. They are used only if they fall inside the element's bounding box.
 2. Otherwise the **centre of the element's bounding box**, marked *approx*. This is exact for symmetric parts (beams, columns, plates) but not for asymmetric ones (angle cleats, brackets, precast with openings). For those, export COG from Tekla/your authoring tool.
 
+## How lifting points are placed
+- Points are laid out **symmetrically about the COG**, so on a rigid load every point carries an equal share.
+- **1 point:** directly above the COG.
+- **2 points:** along the longer plan axis, about 0.207 × length in from each end (the spacing that minimises bending in a uniform beam), centred on the COG.
+- **3 points:** a triangle with its centroid on the COG (wide loads), or a line (narrow loads).
+- **4, 6, 8 points:** two rows either side of the COG (wide loads), or a line (narrow loads).
+- **Layout → Auto** spreads points over the footprint when the load is at least a quarter as wide as it is long; otherwise it puts them in a line. You can force either.
+- Each point is dropped onto the **top of the element below it**. A point that lands in a gap between elements is moved onto the nearest element, and the loads are recalculated from the actual positions.
+- **Load per point** is the most even split that keeps the load level (exact for 1, 2 and 3 points). With 4+ points, or 3+ in a line, the panel warns that equal shares assume a spreader beam or equalising rigging. Many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.
+- If the COG falls outside the lifting points, the panel shows **Unstable**.
+- **Hook height (optional):** draws sling lines to a hook above the COG and gives each leg's length, angle from horizontal and tension. Angles below 45° are flagged. Tensions exclude rigging weight and dynamic factors.
+
 ## Tips for accurate results
 - **Tekla:** add `WEIGHT_GROSS` and `COG_X/Y/Z` to the IFC export's property sets so both weight and true centre of gravity come through.
 - If the marker lands far away from the selection, change **Viewer coordinate units**.
 - If you select an assembly *and* its parts, it can be counted twice. Select one or the other and check the element list.
+- The layout follows the X or Y axis of the model. For loads rotated in plan (e.g. a beam at 30°), use **Along length** with care and check the points sit on the element.
 - Lifting accessories (spreader bars, slings, shackles) are not in the model. Add their weight to the lift plan separately.
 
 ## Files
@@ -35,10 +49,10 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 |---|---|
 | `manifest.json` | Extension manifest – the URL you give Trimble Connect |
 | `index.html`, `style.css` | Panel UI |
-| `app.js` | Viewer wiring (selection, properties, bounding boxes, marker) |
-| `cog.js` | Pure COG maths, no viewer dependency |
-| `test-cog.js` | `node test-cog.js` – unit tests for the maths |
-| `cog.svg`, `icon.svg` | COG marker and panel icon |
+| `app.js` | Viewer wiring (selection, properties, bounding boxes, markups) |
+| `cog.js` | Pure COG and lifting-point maths, no viewer dependency |
+| `test-cog.js` | `node test-cog.js` – unit tests for the COG and lifting-point maths |
+| `icon.svg` | Panel icon |
 
 ## Deploy
 1. Host the folder on any **HTTPS** static host (GitHub Pages, Netlify, Azure Static Web Apps…).
