@@ -4,12 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Lift COG</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=1.3.0" />
   <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
 </head>
 <body>
   <header>
-    <h1>Lift COG</h1>
+    <h1>Lift COG <span id="version" class="hint"></span></h1>
     <div id="status" class="status pending">Connecting…</div>
   </header>
 
@@ -52,9 +52,10 @@
     </label>
     <label class="check"><input type="checkbox" id="labels" checked /> Label points with their load</label>
     <div class="row">
-      <button id="btnLift" class="blue">Show lifting points</button>
-      <button id="btnLiftClear" class="secondary">Clear lifting points</button>
+      <button id="btnLift" class="blue">Redraw lifting points</button>
+      <button id="btnLiftClear" class="secondary">Hide lifting points</button>
     </div>
+    <div id="liftStatus" class="muted"></div>
     <div id="liftResult" class="muted">Select elements to plan lifting points.</div>
   </section>
 
@@ -82,7 +83,7 @@
     <pre id="log"></pre>
   </section>
 
-  <script src="cog.js"></script>
-  <script src="app.js"></script>
+  <script src="cog.js?v=1.3.0"></script>
+  <script src="app.js?v=1.3.0"></script>
 </body>
 </html>
