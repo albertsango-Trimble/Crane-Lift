@@ -7,9 +7,10 @@ const MARKER_COLOR = { r: 255, g: 20, b: 147, a: 255 }; // pink (0–255 per cha
 let markerId = null; // id the viewer assigns to our COG point markup
 const LIFT_COLOR = { r: 0, g: 120, b: 255, a: 255 }; // blue
 let liftIds = [];        // markup ids for lifting points, labels and sling lines
-let liftVisible = false; // when true, markups follow changes automatically
+let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
+const VERSION = "1.4.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -34,10 +35,100 @@ const density = () => parseFloat($("density").value) || 0;
 let timer = null;
 function onEvent(event, args) {
   if (event === "viewer.onSelectionChanged") {
+    if (picking) return; // clicks made while tracing must not change what is being lifted
     const sel = args?.data ?? args ?? [];
     clearTimeout(timer);
     timer = setTimeout(() => loadSelection(sel).catch((e) => log("Error:", String(e))), 250);
+  } else if (event === "viewer.onPicked") {
+    onPicked(args?.data ?? args);
   }
+}
+
+// ---------- tracing a sloped / skewed element ----------
+// The user clicks two points on the TOP of the element; the line between them gives the
+// member's real direction and top-surface height, which a bounding box can't.
+let trace = null;   // { key, a, b, source } in metres, tied to one selection
+let picking = null; // { key, pts: [] } while waiting for clicks
+let pickTimeout = null;
+
+const selectionKey = () => selection.map((m) => `${m.modelId}:${[...m.objectRuntimeIds].sort((x, y) => x - y).join(",")}`).sort().join("|");
+const activeTrace = () => (trace && trace.key === selectionKey() ? trace : null);
+
+function traceStatus(html, cls = "hint") { $("traceStatus").className = cls; $("traceStatus").innerHTML = html; }
+
+// Picked positions come in the viewer's units; choose the scale that puts them on the selection.
+function toMetres(pos) {
+  const box = result?.box, s = unitScale();
+  const fits = (k) => box && ["x", "y", "z"].every((c) => pos[c] * k >= box.min[c] - 1 && pos[c] * k <= box.max[c] + 1);
+  const k = [s, s * 0.001, s * 1000].find(fits);
+  return k ? { x: pos.x * k, y: pos.y * k, z: pos.z * k } : null;
+}
+
+async function startTrace() {
+  if (picking) return cancelTrace("Trace cancelled.");
+  if (!result?.box) return traceStatus("Select the element first.", "err-text small");
+  picking = { key: selectionKey(), pts: [] };
+  $("btnTrace").textContent = "Cancel trace";
+  traceStatus("<strong>Click the top of the element near one end</strong> (1 of 2).", "warn-text");
+  clearTimeout(pickTimeout);
+  pickTimeout = setTimeout(() => picking && cancelTrace("Trace timed out. If clicks aren't being picked up, use <em>Use 2 measured points</em> instead."), 120000);
+  try {
+    await API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – trace element", text: "Click the top of the element near one end" } });
+  } catch (e) {
+    cancelTrace(`The viewer's picking tool isn't available (${esc(e.message || e)}). Use <em>Use 2 measured points</em> instead.`, "err-text small");
+  }
+}
+
+function cancelTrace(msg, cls = "hint") {
+  picking = null;
+  clearTimeout(pickTimeout);
+  $("btnTrace").textContent = "Trace element (2 clicks)";
+  API?.viewer.activateTool("reset").catch(() => {});
+  if (msg) traceStatus(msg, cls);
+}
+
+function onPicked(data) {
+  if (!picking) return;
+  const det = Array.isArray(data) ? data[0] : data;
+  if (!det?.position) return;
+  const p = toMetres(det.position);
+  if (!p) return traceStatus("That click wasn't on the selected element – click its top surface.", "err-text small");
+  picking.pts.push(p);
+  log(`Trace point ${picking.pts.length}: ${f(p.x)}, ${f(p.y)}, ${f(p.z)} m`);
+  if (picking.pts.length === 1) {
+    traceStatus("<strong>Now click the top of the element near the other end</strong> (2 of 2).", "warn-text");
+    API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – trace element", text: "Now click the top near the other end" } }).catch(() => {});
+    return;
+  }
+  setTrace(picking.key, picking.pts[0], picking.pts[1], "clicked");
+  cancelTrace();
+}
+
+function setTrace(key, a, b, source) {
+  trace = { key, a, b, source };
+  const len = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+  traceStatus(`Element traced (${source === "measured" ? "from your measured points" : "from your clicks"}, ${f(len, 2)} m). Points now follow the element.`, "ok-text");
+  recalc();
+}
+
+// Fallback: use the last two Single point measurements the user placed (MarkupPick positions are mm).
+async function traceFromMeasurements() {
+  if (!result?.box) return traceStatus("Select the element first.", "err-text small");
+  const list = await API.markup.getSinglePointMarkups().catch(() => []);
+  const mine = (Array.isArray(list) ? list : []).filter((m) => !sameColor(m.color, LIFT_COLOR) && !sameColor(m.color, MARKER_COLOR) && m.start);
+  const pts = mine.slice(-2).map((m) => ({ x: m.start.positionX / 1000, y: m.start.positionY / 1000, z: m.start.positionZ / 1000 }));
+  const box = result.box;
+  const onSel = (p) => ["x", "y", "z"].every((c) => p[c] >= box.min[c] - 1 && p[c] <= box.max[c] + 1);
+  if (pts.length < 2 || !pts.every(onSel)) {
+    return traceStatus("Place two <strong>Measure → Single point</strong> measurements on the top of the element, near each end, then press this again.", "err-text small");
+  }
+  setTrace(selectionKey(), pts[0], pts[1], "measured");
+}
+
+function clearTrace() {
+  trace = null;
+  traceStatus("");
+  recalc();
 }
 
 // ---------- data loading ----------
@@ -93,12 +184,18 @@ function recalc() {
 function planLift() {
   lift = null;
   if (!result?.cog) return;
-  const plan = COG.planLiftPoints({
-    cog: result.cog,
-    boxes: rows.map((r) => r.box),
-    n: parseInt($("nPoints").value, 10),
-    layout: $("layout").value,
-  });
+  const opts = { cog: result.cog, boxes: rows.map((r) => r.box), n: parseInt($("nPoints").value, 10), layout: $("layout").value };
+  const tr = activeTrace();
+  let plan;
+  if (tr) {
+    plan = COG.planOnAxis({ ...opts, a: tr.a, b: tr.b });
+    if (plan?.error) { lift = { error: plan.error }; return; }
+  } else {
+    // A bounding box is only a good stand-in for the top surface of flat, axis-aligned loads.
+    const flags = COG.looksSloped(result.box);
+    if (flags.sloped || flags.skewed) { lift = { needsTrace: true, flags }; return; }
+    plan = COG.planLiftPoints(opts);
+  }
   if (!plan) return;
   const shares = COG.loadShares(plan.points, result.cog, result.totalKg);
   const sl = COG.slings(plan.points, result.cog, parseFloat($("hookHeight").value), shares.kg);
@@ -108,39 +205,94 @@ function planLift() {
 let liftTimer = null;
 function scheduleLiftRedraw() {
   clearTimeout(liftTimer);
-  liftTimer = setTimeout(() => drawLift().catch((e) => log("Lifting points:", String(e))), 300);
+  liftTimer = setTimeout(() => drawLift().catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }), 300);
 }
 
 const mm = (p) => ({ positionX: p.x * 1000, positionY: p.y * 1000, positionZ: p.z * 1000 });
+const sameColor = (a, b) => a && b && a.r === b.r && a.g === b.g && a.b === b.b;
+
+// Calls a MarkupAPI add method and returns the ids it reports. Copes with viewers that
+// return nothing, and throws a readable error if the method doesn't exist.
+async function addMarkups(method, items) {
+  if (!API.markup || typeof API.markup[method] !== "function") throw new Error(`markup.${method} is not available in this viewer`);
+  const res = await API.markup[method](items);
+  return Array.isArray(res) ? res.map((m) => m?.id).filter((id) => id != null) : [];
+}
+
+// Removes every point/text/line markup of the given colour. Used as a safety net because some
+// viewer versions don't return ids, and so markups survive panel reloads.
+async function sweepMarkups(color) {
+  const ids = [];
+  for (const get of ["getSinglePointMarkups", "getTextMarkups", "getLineMarkups"]) {
+    if (typeof API.markup?.[get] !== "function") continue;
+    const list = await API.markup[get]().catch(() => []);
+    for (const m of Array.isArray(list) ? list : []) if (sameColor(m.color, color) && m.id != null) ids.push(m.id);
+  }
+  if (ids.length) await API.markup.removeMarkups(ids).catch(() => {});
+}
+
+function liftStatus(html, cls = "muted") {
+  $("liftStatus").className = cls;
+  $("liftStatus").innerHTML = html;
+}
+
+const LIFT_ICON_BASE = 880000; // ids for the icon fallback
+let liftIcons = [];
 
 async function drawLift() {
   await clearLift();
-  if (!lift) return;
-  const ids = [];
-  const pts = await API.markup.addSinglePointMarkups(lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p) })));
-  ids.push(...pts.map((m) => m.id));
+  if (!lift || !lift.points) {
+    liftStatus(lift?.needsTrace ? "Not drawn – trace the element first (see below)." : lift?.error ? esc(lift.error) : "", lift ? "warn-text" : "muted");
+    return;
+  }
+  const ids = [], problems = [];
 
+  // 1. Points – blue single point measurements; fall back to blue icons if markups fail.
+  try {
+    ids.push(...await addMarkups("addSinglePointMarkups", lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p) }))));
+  } catch (e) {
+    problems.push(`Single point markups failed (${esc(e.message || e)}), showing icons instead.`);
+    try {
+      liftIcons = lift.points.map((p, i) => ({ id: LIFT_ICON_BASE + i, iconPath: new URL("lift.svg", location.href).href, position: { x: p.x, y: p.y, z: p.z }, size: 28 }));
+      await API.viewer.addIcon(liftIcons);
+    } catch (e2) {
+      liftIcons = [];
+      problems.push(`Icons failed too (${esc(e2.message || e2)}).`);
+    }
+  }
+
+  // 2. Labels and 3. sling lines – optional extras, failures don't stop the points.
   if ($("labels").checked) {
     const up = Math.max(0.3, (result.box.max.z - result.box.min.z) * 0.5); // leader length (m)
-    const texts = await API.markup.addTextMarkup(lift.points.map((p, i) => ({
-      color: LIFT_COLOR,
-      start: mm(p),
-      end: mm({ x: p.x, y: p.y, z: p.z + up }),
-      text: `${p.label} ${kg(lift.shares.kg[i])}`,
-    })));
-    ids.push(...texts.map((m) => m.id));
+    try {
+      ids.push(...await addMarkups("addTextMarkup", lift.points.map((p, i) => ({
+        color: LIFT_COLOR, start: mm(p), end: mm({ x: p.x, y: p.y, z: p.z + up }), text: `${p.label} ${kg(lift.shares.kg[i])}`,
+      }))));
+    } catch (e) { problems.push(`Labels failed (${esc(e.message || e)}).`); }
   }
-
   if (lift.slings) {
-    const lines = await API.markup.addLineMarkups(lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p), end: mm(lift.slings.hook) })));
-    ids.push(...lines.map((m) => m.id));
+    try {
+      ids.push(...await addMarkups("addLineMarkups", lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p), end: mm(lift.slings.hook) }))));
+    } catch (e) { problems.push(`Sling lines failed (${esc(e.message || e)}).`); }
   }
-  liftIds = ids.filter((id) => id != null);
+  liftIds = ids;
+
+  const where = lift.points.map((p) => `${p.label} (${f(p.x, 2)}, ${f(p.y, 2)}, ${f(p.z, 2)})`).join(", ");
+  log(`Lifting points drawn: ${where}`);
+  if (problems.length) {
+    problems.forEach((p) => log(p.replace(/<[^>]+>/g, "")));
+    liftStatus(problems.join("<br>"), "err-text small");
+  } else {
+    liftStatus(`Showing ${lift.points.length} lifting point${lift.points.length > 1 ? "s" : ""} in blue.`, "ok-text");
+  }
 }
 
 async function clearLift() {
   if (liftIds.length) await API.markup.removeMarkups(liftIds).catch(() => {});
   liftIds = [];
+  if (liftIcons.length) await API.viewer.removeIcon(liftIcons).catch(() => {});
+  liftIcons = [];
+  await sweepMarkups(LIFT_COLOR);
 }
 
 // ---------- rendering ----------
@@ -153,6 +305,15 @@ function render() {
 function renderLift() {
   if (!lift) {
     $("liftResult").innerHTML = '<span class="muted">Select elements with a known weight to plan lifting points.</span>';
+    return;
+  }
+  if (lift.error) {
+    $("liftResult").innerHTML = `<p class="err-text">${esc(lift.error)}</p>`;
+    return;
+  }
+  if (lift.needsTrace) {
+    const what = [lift.flags.sloped && "sloped", lift.flags.skewed && "running diagonally in plan"].filter(Boolean).join(" and ");
+    $("liftResult").innerHTML = `<p class="warn-text"><strong>This load looks ${what}.</strong> The viewer only gives a square-on bounding box, so points placed from it would float above the element. Trace the element so the points follow its real top surface.</p>`;
     return;
   }
   const { points, shares, slings: sl, layout, notes } = lift;
@@ -183,7 +344,9 @@ function renderLift() {
   for (const n of notes) msgs.push(`<p class="warn-text">${esc(n)}</p>`);
 
   $("liftResult").innerHTML = `
-    <div class="hint">Layout: ${layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.</div>
+    <div class="hint">${lift.axis === "traced"
+      ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope). Layout: ${layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
+      : `Layout: ${layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.`}</div>
     <table class="lift">${head}${body}</table>
     ${sl ? `<p class="hint">*Angle from horizontal. Hook at ${f(sl.hook.x)}, ${f(sl.hook.y)}, ${f(sl.hook.z)} m. Tension excludes rigging weight and dynamic factors.</p>` : ""}
     ${msgs.join("")}`;
@@ -251,22 +414,16 @@ async function showMarker() {
   await clearMarker();
   // Single point measurement markup (same as the viewer's Measure → Single point tool).
   // MarkupPick positions are in millimetres; result.cog is in metres.
-  const [markup] = await API.markup.addSinglePointMarkups([{
-    color: MARKER_COLOR,
-    start: {
-      positionX: result.cog.x * 1000,
-      positionY: result.cog.y * 1000,
-      positionZ: result.cog.z * 1000,
-    },
-  }]);
-  markerId = markup?.id ?? null;
+  const [id] = await addMarkups("addSinglePointMarkups", [{ color: MARKER_COLOR, start: mm(result.cog) }]);
+  markerId = id ?? null;
   log(`COG point placed at ${f(result.cog.x)}, ${f(result.cog.y)}, ${f(result.cog.z)} m`);
 }
 
 async function clearMarker() {
-  // Only removes our own COG point – the user's other measurements are left alone.
+  // Only removes our own (pink) COG point – the user's other measurements are left alone.
   if (markerId != null) await API.markup.removeMarkups([markerId]).catch(() => {});
   markerId = null;
+  await sweepMarkups(MARKER_COLOR);
 }
 
 async function fit() {
@@ -284,9 +441,9 @@ async function copyResult() {
     "Element\tWeight (kg)\tWeight source\tCentre source",
     ...rows.map((r) => `${r.name}\t${r.kg > 0 ? r.kg.toFixed(1) : "-"}\t${r.massSource}\t${r.centreSource}`),
   ];
-  if (lift) {
+  if (lift?.points) {
     const sl = lift.slings;
-    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
+    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout}${lift.axis === "traced" ? `, along traced element, ${lift.slopeDeg.toFixed(1)}° slope` : ""})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
       `Point\tX (m)\tY (m)\tZ (m)\tLoad (kg)${sl ? "\tSling (m)\tAngle from horizontal (°)\tTension (kg)" : ""}`,
       ...lift.points.map((p, i) => [p.label, p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3), lift.shares.kg[i].toFixed(1),
         ...(sl ? [sl.legs[i].length.toFixed(2), sl.legs[i].angleFromHorizontal.toFixed(0), sl.legs[i].tensionKg.toFixed(1)] : [])].join("\t")));
@@ -303,6 +460,7 @@ async function main() {
   try {
     API = await TrimbleConnectWorkspace.connect(window.parent, onEvent, 30000);
     setStatus("Connected", "ok");
+    log(`Lift COG v${VERSION} connected`);
     await loadSelection(await API.viewer.getSelection());
   } catch (e) {
     setStatus("Not connected", "err");
@@ -310,14 +468,18 @@ async function main() {
   }
 }
 
-$("btnMarker").onclick = () => showMarker().catch((e) => log(String(e)));
+$("btnMarker").onclick = () => showMarker().catch((e) => log("COG marker failed:", String(e)));
 $("btnClear").onclick = () => clearMarker().catch((e) => log(String(e)));
 $("btnFit").onclick = () => fit().catch((e) => log(String(e)));
 $("btnCopy").onclick = () => copyResult().catch((e) => log(String(e)));
-$("btnLift").onclick = () => { liftVisible = true; drawLift().catch((e) => log("Lifting points:", String(e))); };
-$("btnLiftClear").onclick = () => { liftVisible = false; clearLift().catch((e) => log(String(e))); };
+$("btnLift").onclick = () => { liftVisible = true; drawLift().catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }); };
+$("version").textContent = `v${VERSION}`;
+$("btnLiftClear").onclick = () => { liftVisible = false; clearLift().then(() => liftStatus("Lifting points hidden.")).catch((e) => log(String(e))); };
 $("density").onchange = recalc;
 $("units").onchange = recalc;
 for (const id of ["nPoints", "layout", "hookHeight", "labels"]) $(id).onchange = recalc;
+$("btnTrace").onclick = () => startTrace().catch((e) => cancelTrace(esc(String(e)), "err-text small"));
+$("btnTraceMeasured").onclick = () => traceFromMeasurements().catch((e) => traceStatus(esc(String(e)), "err-text small"));
+$("btnTraceClear").onclick = clearTrace;
 
 main();
