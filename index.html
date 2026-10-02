@@ -27,6 +27,38 @@
   </section>
 
   <section>
+    <h2>Lifting points</h2>
+    <div class="grid2">
+      <label class="field">Number of points
+        <select id="nPoints">
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="6">6</option>
+          <option value="8">8</option>
+        </select>
+      </label>
+      <label class="field">Layout
+        <select id="layout">
+          <option value="auto" selected>Auto</option>
+          <option value="line">Along length</option>
+          <option value="area">Spread over footprint</option>
+        </select>
+      </label>
+    </div>
+    <label class="field">Hook height above lifting points (m, optional – for sling angles)
+      <input type="number" id="hookHeight" min="0" step="0.1" placeholder="e.g. 3" />
+    </label>
+    <label class="check"><input type="checkbox" id="labels" checked /> Label points with their load</label>
+    <div class="row">
+      <button id="btnLift" class="blue">Show lifting points</button>
+      <button id="btnLiftClear" class="secondary">Clear lifting points</button>
+    </div>
+    <div id="liftResult" class="muted">Select elements to plan lifting points.</div>
+  </section>
+
+  <section>
     <h2>Settings</h2>
     <label class="field">Density for volume-based weights (kg/m³)
       <input type="number" id="density" value="7850" min="0" step="10" />
