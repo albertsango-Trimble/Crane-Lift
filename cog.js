@@ -122,6 +122,106 @@
   }
 
   /**
+   * Offsets [du, dv] of the lifting points relative to the COG, in the layout's own axes:
+   * u = along the load, v = across it. back/front = usable room behind/in front of the COG along u.
+   */
+  function makeUV(n, used, Lu, Lv, back, front, roomV) {
+    back = Math.max(0, back); front = Math.max(0, front);
+    const roomU = Math.min(back, front);
+    if (used === "single") return [[0, 0]];
+    if (used === "line") return rowOffsets(n, Lu, roomU).map((du) => [du, 0]);
+    if (n === 3) {
+      // Isosceles triangle with its centroid on the COG: two points behind, apex on the side with more room.
+      const s = front >= back ? 1 : -1;
+      const p = Math.max(0, Math.min(0.25 * Lu, s > 0 ? back : front, (s > 0 ? front : back) / 2));
+      const q = Math.min(0.2929 * Lv, roomV);
+      return [[-s * p, -q], [-s * p, q], [2 * s * p, 0]];
+    }
+    // Two rows either side of the COG (4 → 2×2, 6 → 2×3, 8 → 2×4).
+    const uv = [], dv = Math.min(0.2929 * Lv, roomV);
+    for (const du of rowOffsets(Math.ceil(n / 2), Lu, roomU)) uv.push([du, -dv], [du, dv]);
+    return uv;
+  }
+
+  /**
+   * True when an axis-aligned bounding box is a poor stand-in for the element's top surface:
+   * the element is sloped (tall box relative to its length) or skewed in plan (wide box for a long member).
+   */
+  function looksSloped(box) {
+    if (!box) return { sloped: false, skewed: false };
+    const Lx = box.max.x - box.min.x, Ly = box.max.y - box.min.y, Lz = box.max.z - box.min.z;
+    const L = Math.max(Lx, Ly), W = Math.min(Lx, Ly);
+    return {
+      sloped: Lz > 1.0 && Lz > 0.15 * L,          // e.g. raking rafter, inclined truss
+      skewed: L > 3 && W > 1.0 && W > 0.15 * L && W < 0.5 * L, // long member running diagonally in plan
+    };
+  }
+
+  // Parameter range [t0, t1] where the line a + t·d lies inside box (slab method), or null.
+  function clipLine(a, d, box) {
+    let t0 = -Infinity, t1 = Infinity;
+    for (const k of ["x", "y", "z"]) {
+      if (Math.abs(d[k]) < 1e-12) { if (a[k] < box.min[k] || a[k] > box.max[k]) return null; continue; }
+      let ta = (box.min[k] - a[k]) / d[k], tb = (box.max[k] - a[k]) / d[k];
+      if (ta > tb) [ta, tb] = [tb, ta];
+      t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+    }
+    return t1 >= t0 ? [t0, t1] : null;
+  }
+
+  /**
+   * Lifting points along a traced member line. a, b = two points the user clicked on the TOP of
+   * the element (metres). The line gives direction and top-surface height; it is moved sideways in
+   * plan so it passes over the COG, so points stay symmetric about the COG and loads stay equal.
+   */
+  function planOnAxis({ cog, a, b, boxes, n, layout = "auto" }) {
+    const bs = boxes.filter(Boolean), ub = unionBox(bs);
+    if (!ub || !cog || !a || !b || !(n >= 1)) return null;
+    let d = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+    const L3 = Math.hypot(d.x, d.y, d.z);
+    const planLen = Math.hypot(d.x, d.y);
+    if (L3 < 0.2) return { error: "The two traced points are too close together – click near each end of the element." };
+    if (planLen < 0.05 * L3) return { error: "The traced line is vertical – trace along the length of the element, not up its side." };
+    d = { x: d.x / L3, y: d.y / L3, z: d.z / L3 };
+    const h = { x: d.x * L3 / planLen, y: d.y * L3 / planLen }; // plan direction (unit)
+    const nrm = { x: -h.y, y: h.x };                             // plan normal (unit)
+    const dxy = planLen / L3;                                     // plan metres per metre along member
+
+    // Shift the line sideways so it passes over the COG in plan.
+    const e = (cog.x - a.x) * nrm.x + (cog.y - a.y) * nrm.y;
+    const a2 = { x: a.x + e * nrm.x, y: a.y + e * nrm.y, z: a.z };
+
+    // Member extent along the line: where it runs through the selection's box (with a little slack).
+    const slack = 0.05;
+    const span = clipLine(a2, d, { min: { x: ub.min.x - slack, y: ub.min.y - slack, z: ub.min.z - slack }, max: { x: ub.max.x + slack, y: ub.max.y + slack, z: ub.max.z + slack } })
+      || [Math.min(0, L3), Math.max(0, L3)];
+    const [t0, t1] = [Math.min(span[0], 0), Math.max(span[1], L3)]; // never shorter than what was clicked
+    const tc = ((cog.x - a2.x) * h.x + (cog.y - a2.y) * h.y) / dxy; // COG position along the member
+    const L = t1 - t0, m = Math.max(0.05, 0.02 * L);
+
+    // Width across the member, estimated from the plan box and the traced direction.
+    const Lx = ub.max.x - ub.min.x, Ly = ub.max.y - ub.min.y, Lp = L * dxy;
+    const cx = Math.abs(h.x), cy = Math.abs(h.y);
+    const W = Math.max(0, cx >= cy ? (Ly - Lp * cy) / cx : (Lx - Lp * cx) / cy);
+    const roomV = Math.max(0, W / 2 - Math.max(0.05, 0.05 * W));
+
+    const notes = [];
+    let used = n === 1 ? "single" : n === 2 ? "line" : layout === "auto" ? (W >= 0.25 * L && roomV > 0.1 ? "area" : "line") : layout;
+    if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Element is too narrow to spread points across its width – placed in a line instead."); }
+
+    const uv = makeUV(n, used, L, W, tc - t0 - m, t1 - tc - m, roomV);
+    const points = uv.map(([du, dv], i) => {
+      const t = tc + du;
+      const p = { x: a2.x + t * d.x + dv * nrm.x, y: a2.y + t * d.y + dv * nrm.y, z: a2.z + t * d.z };
+      const onElement = bs.some((bx) => inPlan(p, bx, 0.05) && p.z >= bx.min.z - 0.05 && p.z <= bx.max.z + 0.05);
+      return { label: `P${i + 1}`, ...p, snapped: false, onElement };
+    });
+    if (points.some((p) => !p.onElement)) notes.push("Some points are outside the selected elements – check the trace was made along the top of the element.");
+    const slopeDeg = (Math.atan2(Math.abs(d.z), dxy) * 180) / Math.PI;
+    return { points, layout: used, axis: "traced", notes, slopeDeg, length: L, width: W };
+  }
+
+  /**
    * Proposes N lifting points arranged symmetrically about the COG (equal loads on a rigid body),
    * then drops each one onto the top of the element underneath it.
    * opts: { cog, boxes: Box[], n, layout: "auto"|"line"|"area" }
@@ -143,23 +243,7 @@
     const notes = [];
     if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Selection is too narrow to spread points across its width – placed in a line instead."); }
 
-    let uv = [];
-    if (used === "single") uv = [[0, 0]];
-    else if (used === "line") uv = rowOffsets(n, Lu, roomU).map((du) => [du, 0]);
-    else if (n === 3) {
-      // Isosceles triangle with its centroid on the COG: two points behind, apex in front (more room side).
-      const s = ub.max[U] - uc >= uc - ub.min[U] ? 1 : -1;
-      const back = s > 0 ? uc - ub.min[U] - mu : ub.max[U] - uc - mu;
-      const front = s > 0 ? ub.max[U] - uc - mu : uc - ub.min[U] - mu;
-      const p = Math.max(0, Math.min(0.25 * Lu, back, front / 2));
-      const q = Math.min(0.2929 * Lv, roomV);
-      uv = [[-s * p, -q], [-s * p, q], [2 * s * p, 0]];
-    } else {
-      // Two rows either side of the COG (4 → 2×2, 6 → 2×3, 8 → 2×4).
-      const cols = rowOffsets(Math.ceil(n / 2), Lu, roomU);
-      const dv = Math.min(0.2929 * Lv, roomV);
-      for (const du of cols) uv.push([du, -dv], [du, dv]);
-    }
+    const uv = makeUV(n, used, Lu, Lv, uc - ub.min[U] - mu, ub.max[U] - uc - mu, roomV);
 
     const points = uv.map(([du, dv], i) => {
       let p = { [U]: uc + du, [V]: vc + dv };
@@ -254,7 +338,7 @@
     return { hook, legs };
   }
 
-  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, loadShares, slings };
+  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, planOnAxis, looksSloped, loadShares, slings };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.COG = api;
 })(this);
