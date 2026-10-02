@@ -5,6 +5,10 @@
 const $ = (id) => document.getElementById(id);
 const MARKER_COLOR = { r: 255, g: 20, b: 147, a: 255 }; // pink (0–255 per channel)
 let markerId = null; // id the viewer assigns to our COG point markup
+const LIFT_COLOR = { r: 0, g: 120, b: 255, a: 255 }; // blue
+let liftIds = [];        // markup ids for lifting points, labels and sling lines
+let liftVisible = false; // when true, markups follow changes automatically
+let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
 
 let API = null;
@@ -42,7 +46,7 @@ async function loadSelection(sel) {
   const total = selection.reduce((n, m) => n + m.objectRuntimeIds.length, 0);
   $("selCount").textContent = total;
   rows = [];
-  if (!total) return render();
+  if (!total) return recalc(); // clears the result, lifting plan and (if shown) lifting markups
   if (total > MAX_OBJECTS) {
     log(`${total} objects selected – only the first ${MAX_OBJECTS} are used.`);
   }
@@ -80,13 +84,109 @@ function recalc() {
   }
   result = rows.length ? COG.combine(rows) : null;
   if (result) result.box = COG.unionBox(rows.map((r) => r.box));
+  planLift();
   render();
+  if (liftVisible) scheduleLiftRedraw();
+}
+
+// ---------- lifting points ----------
+function planLift() {
+  lift = null;
+  if (!result?.cog) return;
+  const plan = COG.planLiftPoints({
+    cog: result.cog,
+    boxes: rows.map((r) => r.box),
+    n: parseInt($("nPoints").value, 10),
+    layout: $("layout").value,
+  });
+  if (!plan) return;
+  const shares = COG.loadShares(plan.points, result.cog, result.totalKg);
+  const sl = COG.slings(plan.points, result.cog, parseFloat($("hookHeight").value), shares.kg);
+  lift = { ...plan, shares, slings: sl };
+}
+
+let liftTimer = null;
+function scheduleLiftRedraw() {
+  clearTimeout(liftTimer);
+  liftTimer = setTimeout(() => drawLift().catch((e) => log("Lifting points:", String(e))), 300);
+}
+
+const mm = (p) => ({ positionX: p.x * 1000, positionY: p.y * 1000, positionZ: p.z * 1000 });
+
+async function drawLift() {
+  await clearLift();
+  if (!lift) return;
+  const ids = [];
+  const pts = await API.markup.addSinglePointMarkups(lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p) })));
+  ids.push(...pts.map((m) => m.id));
+
+  if ($("labels").checked) {
+    const up = Math.max(0.3, (result.box.max.z - result.box.min.z) * 0.5); // leader length (m)
+    const texts = await API.markup.addTextMarkup(lift.points.map((p, i) => ({
+      color: LIFT_COLOR,
+      start: mm(p),
+      end: mm({ x: p.x, y: p.y, z: p.z + up }),
+      text: `${p.label} ${kg(lift.shares.kg[i])}`,
+    })));
+    ids.push(...texts.map((m) => m.id));
+  }
+
+  if (lift.slings) {
+    const lines = await API.markup.addLineMarkups(lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p), end: mm(lift.slings.hook) })));
+    ids.push(...lines.map((m) => m.id));
+  }
+  liftIds = ids.filter((id) => id != null);
+}
+
+async function clearLift() {
+  if (liftIds.length) await API.markup.removeMarkups(liftIds).catch(() => {});
+  liftIds = [];
 }
 
 // ---------- rendering ----------
 function render() {
   renderResult();
+  renderLift();
   renderElements();
+}
+
+function renderLift() {
+  if (!lift) {
+    $("liftResult").innerHTML = '<span class="muted">Select elements with a known weight to plan lifting points.</span>';
+    return;
+  }
+  const { points, shares, slings: sl, layout, notes } = lift;
+  const W = result.totalKg;
+  const head = `<tr><th>Point</th><th>X (m)</th><th>Y (m)</th><th>Z (m)</th><th>Load</th>${sl ? "<th>Sling</th><th>Angle*</th><th>Tension</th>" : ""}</tr>`;
+  const body = points.map((p, i) => {
+    const leg = sl?.legs[i];
+    return `<tr><td><span class="dot"></span>${p.label}</td><td>${f(p.x)}</td><td>${f(p.y)}</td><td>${f(p.z)}</td>
+      <td>${kg(shares.kg[i])}<div class="hint">${f((100 * shares.kg[i]) / W, 0)}%</div></td>
+      ${leg ? `<td>${f(leg.length, 2)} m</td><td class="${leg.angleFromHorizontal < 45 ? "err-text" : ""}">${f(leg.angleFromHorizontal, 0)}°</td><td>${kg(leg.tensionKg)}</td>` : ""}</tr>`;
+  }).join("");
+
+  const msgs = [];
+  if (!shares.stable) {
+    msgs.push(`<p class="err-text"><strong>Unstable:</strong> the centre of gravity is outside the lifting points${shares.offset > 0.005 ? ` (${f(shares.offset * 1000, 0)} mm off their line)` : ""}. The load will tilt or roll. Choose a different number of points or layout.</p>`);
+  } else if (points.length > 1) {
+    const spread = Math.max(...shares.kg) - Math.min(...shares.kg);
+    msgs.push(spread <= 0.01 * W
+      ? '<p class="ok-text">Balanced: every point carries an equal share and the hook sits directly above the COG.</p>'
+      : '<p class="warn-text">Loads are unequal because some points had to move onto an element – check the shares above.</p>');
+  }
+  if (!shares.determinate) {
+    msgs.push(`<p class="warn-text">With ${points.length} points the shares assume the load is shared evenly, e.g. through a spreader beam or equalising rigging. With fixed-length slings a rigid load may hang on fewer points – many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.</p>`);
+  }
+  if (sl?.legs.some((l) => l.angleFromHorizontal < 45)) {
+    msgs.push('<p class="err-text">Sling angle below 45° from horizontal – increase hook height or reduce point spacing.</p>');
+  }
+  for (const n of notes) msgs.push(`<p class="warn-text">${esc(n)}</p>`);
+
+  $("liftResult").innerHTML = `
+    <div class="hint">Layout: ${layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.</div>
+    <table class="lift">${head}${body}</table>
+    ${sl ? `<p class="hint">*Angle from horizontal. Hook at ${f(sl.hook.x)}, ${f(sl.hook.y)}, ${f(sl.hook.z)} m. Tension excludes rigging weight and dynamic factors.</p>` : ""}
+    ${msgs.join("")}`;
 }
 
 function renderResult() {
@@ -184,6 +284,14 @@ async function copyResult() {
     "Element\tWeight (kg)\tWeight source\tCentre source",
     ...rows.map((r) => `${r.name}\t${r.kg > 0 ? r.kg.toFixed(1) : "-"}\t${r.massSource}\t${r.centreSource}`),
   ];
+  if (lift) {
+    const sl = lift.slings;
+    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
+      `Point\tX (m)\tY (m)\tZ (m)\tLoad (kg)${sl ? "\tSling (m)\tAngle from horizontal (°)\tTension (kg)" : ""}`,
+      ...lift.points.map((p, i) => [p.label, p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3), lift.shares.kg[i].toFixed(1),
+        ...(sl ? [sl.legs[i].length.toFixed(2), sl.legs[i].angleFromHorizontal.toFixed(0), sl.legs[i].tensionKg.toFixed(1)] : [])].join("\t")));
+    if (!lift.shares.determinate) lines.push("Note: shares assume even load sharing (spreader beam / equalising rigging).");
+  }
   await navigator.clipboard.writeText(lines.join("\n")).then(
     () => log("Result copied to clipboard"),
     () => log("Clipboard blocked – check the Log for the text") || log(lines.join("\n")),
@@ -206,7 +314,10 @@ $("btnMarker").onclick = () => showMarker().catch((e) => log(String(e)));
 $("btnClear").onclick = () => clearMarker().catch((e) => log(String(e)));
 $("btnFit").onclick = () => fit().catch((e) => log(String(e)));
 $("btnCopy").onclick = () => copyResult().catch((e) => log(String(e)));
+$("btnLift").onclick = () => { liftVisible = true; drawLift().catch((e) => log("Lifting points:", String(e))); };
+$("btnLiftClear").onclick = () => { liftVisible = false; clearLift().catch((e) => log(String(e))); };
 $("density").onchange = recalc;
 $("units").onchange = recalc;
+for (const id of ["nPoints", "layout", "hookHeight", "labels"]) $(id).onchange = recalc;
 
 main();
