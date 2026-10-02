@@ -51,3 +51,4 @@ table.lift th:first-child, table.lift td:first-child { text-align: left; }
 table.lift td { text-align: right; white-space: nowrap; }
 table.lift td:first-child { width: auto; color: var(--fg); font-weight: 600; }
 .ok-text { color: var(--ok); font-size: 12px; }
+.small { font-size: 12px; } #liftStatus { margin: -4px 0 8px; font-size: 12px; } h1 .hint { font-weight: 400; }
