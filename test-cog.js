@@ -1,372 +1,260 @@
-// Lift COG – Trimble Connect 3D Viewer extension
-// Works out the combined centre of gravity of the selected elements so a crane hook
-// can be positioned directly above it.
+// Centre-of-gravity maths – no viewer dependencies, so it can be unit-tested in Node.
+// Property units per Workspace API PropertyType: LengthMeasure(0)=mm, VolumeMeasure(2)=m3, MassMeasure(3)=kg.
+(function (root) {
+  const PT = { Length: 0, Volume: 2, Mass: 3 };
 
-const $ = (id) => document.getElementById(id);
-const MARKER_COLOR = { r: 255, g: 20, b: 147, a: 255 }; // pink (0–255 per channel)
-let markerId = null; // id the viewer assigns to our COG point markup
-const LIFT_COLOR = { r: 0, g: 120, b: 255, a: 255 }; // blue
-let liftIds = [];        // markup ids for lifting points, labels and sling lines
-let liftVisible = true;  // shown by default; markups follow changes automatically
-let lift = null;         // last lifting plan
-const MAX_OBJECTS = 1000;
-const VERSION = "1.3.0";
+  const num = (v) => {
+    const n = typeof v === "number" ? v : parseFloat(String(v).replace(",", "."));
+    return Number.isFinite(n) ? n : null;
+  };
 
-let API = null;
-let selection = [];   // [{ modelId, objectRuntimeIds }]
-let rows = [];        // per-element data, see buildRows()
-let result = null;    // last combined result
-const overrides = new Map(); // "modelId:id" → kg typed by the user
-
-// ---------- helpers ----------
-function log(...args) {
-  const line = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
-  $("log").textContent = `${new Date().toLocaleTimeString()}  ${line}\n` + $("log").textContent;
-  console.log("[lift-cog]", ...args);
-}
-const setStatus = (t, c) => { $("status").textContent = t; $("status").className = `status ${c}`; };
-const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const f = (n, d = 3) => (n == null ? "–" : n.toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d }));
-const kg = (n) => (n == null ? "–" : n >= 1000 ? `${f(n / 1000, 2)} t` : `${f(n, 1)} kg`);
-const unitScale = () => parseFloat($("units").value);
-const density = () => parseFloat($("density").value) || 0;
-
-// ---------- events ----------
-let timer = null;
-function onEvent(event, args) {
-  if (event === "viewer.onSelectionChanged") {
-    const sel = args?.data ?? args ?? [];
-    clearTimeout(timer);
-    timer = setTimeout(() => loadSelection(sel).catch((e) => log("Error:", String(e))), 250);
-  }
-}
-
-// ---------- data loading ----------
-async function loadSelection(sel) {
-  selection = Array.isArray(sel) ? sel.filter((m) => m.objectRuntimeIds?.length) : [];
-  const total = selection.reduce((n, m) => n + m.objectRuntimeIds.length, 0);
-  $("selCount").textContent = total;
-  rows = [];
-  if (!total) return recalc(); // clears the result, lifting plan and (if shown) lifting markups
-  if (total > MAX_OBJECTS) {
-    log(`${total} objects selected – only the first ${MAX_OBJECTS} are used.`);
-  }
-
-  $("elements").innerHTML = '<span class="muted">Reading properties…</span>';
-  let budget = MAX_OBJECTS;
-  for (const { modelId, objectRuntimeIds } of selection) {
-    const ids = objectRuntimeIds.slice(0, budget);
-    budget -= ids.length;
-    if (!ids.length) break;
-    const [props, boxes] = await Promise.all([
-      API.viewer.getObjectProperties(modelId, ids).catch((e) => (log("Properties failed:", String(e)), [])),
-      API.viewer.getObjectBoundingBoxes(modelId, ids).catch((e) => (log("Bounding boxes failed:", String(e)), [])),
-    ]);
-    const propById = new Map(props.map((p) => [p.id, p]));
-    const boxById = new Map(boxes.map((b) => [b.id, b.boundingBox]));
-    for (const id of ids) rows.push({ modelId, id, obj: propById.get(id) || { id }, rawBox: boxById.get(id) || null });
-  }
-  recalc();
-}
-
-// Recompute masses/centres from cached data (cheap: runs on every setting/override change)
-function recalc() {
-  const s = unitScale();
-  for (const r of rows) {
-    r.box = r.rawBox ? COG.scaleBox(r.rawBox, s) : null;
-    r.name = r.obj.product?.name || r.obj.name || r.obj.class || `Object ${r.id}`;
-    const found = COG.findMass(r.obj, density());
-    const key = `${r.modelId}:${r.id}`;
-    r.override = overrides.has(key);
-    r.kg = r.override ? overrides.get(key) : found.kg;
-    r.massSource = r.override ? "Entered manually" : found.source;
-    const c = COG.findCentre(r.obj, r.box);
-    r.point = c.point; r.centreSource = c.source; r.approx = c.approximate;
-  }
-  result = rows.length ? COG.combine(rows) : null;
-  if (result) result.box = COG.unionBox(rows.map((r) => r.box));
-  planLift();
-  render();
-  if (liftVisible) scheduleLiftRedraw();
-}
-
-// ---------- lifting points ----------
-function planLift() {
-  lift = null;
-  if (!result?.cog) return;
-  const plan = COG.planLiftPoints({
-    cog: result.cog,
-    boxes: rows.map((r) => r.box),
-    n: parseInt($("nPoints").value, 10),
-    layout: $("layout").value,
-  });
-  if (!plan) return;
-  const shares = COG.loadShares(plan.points, result.cog, result.totalKg);
-  const sl = COG.slings(plan.points, result.cog, parseFloat($("hookHeight").value), shares.kg);
-  lift = { ...plan, shares, slings: sl };
-}
-
-let liftTimer = null;
-function scheduleLiftRedraw() {
-  clearTimeout(liftTimer);
-  liftTimer = setTimeout(() => drawLift().catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }), 300);
-}
-
-const mm = (p) => ({ positionX: p.x * 1000, positionY: p.y * 1000, positionZ: p.z * 1000 });
-const sameColor = (a, b) => a && b && a.r === b.r && a.g === b.g && a.b === b.b;
-
-// Calls a MarkupAPI add method and returns the ids it reports. Copes with viewers that
-// return nothing, and throws a readable error if the method doesn't exist.
-async function addMarkups(method, items) {
-  if (!API.markup || typeof API.markup[method] !== "function") throw new Error(`markup.${method} is not available in this viewer`);
-  const res = await API.markup[method](items);
-  return Array.isArray(res) ? res.map((m) => m?.id).filter((id) => id != null) : [];
-}
-
-// Removes every point/text/line markup of the given colour. Used as a safety net because some
-// viewer versions don't return ids, and so markups survive panel reloads.
-async function sweepMarkups(color) {
-  const ids = [];
-  for (const get of ["getSinglePointMarkups", "getTextMarkups", "getLineMarkups"]) {
-    if (typeof API.markup?.[get] !== "function") continue;
-    const list = await API.markup[get]().catch(() => []);
-    for (const m of Array.isArray(list) ? list : []) if (sameColor(m.color, color) && m.id != null) ids.push(m.id);
-  }
-  if (ids.length) await API.markup.removeMarkups(ids).catch(() => {});
-}
-
-function liftStatus(html, cls = "muted") {
-  $("liftStatus").className = cls;
-  $("liftStatus").innerHTML = html;
-}
-
-const LIFT_ICON_BASE = 880000; // ids for the icon fallback
-let liftIcons = [];
-
-async function drawLift() {
-  await clearLift();
-  if (!lift) { liftStatus(""); return; }
-  const ids = [], problems = [];
-
-  // 1. Points – blue single point measurements; fall back to blue icons if markups fail.
-  try {
-    ids.push(...await addMarkups("addSinglePointMarkups", lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p) }))));
-  } catch (e) {
-    problems.push(`Single point markups failed (${esc(e.message || e)}), showing icons instead.`);
-    try {
-      liftIcons = lift.points.map((p, i) => ({ id: LIFT_ICON_BASE + i, iconPath: new URL("lift.svg", location.href).href, position: { x: p.x, y: p.y, z: p.z }, size: 28 }));
-      await API.viewer.addIcon(liftIcons);
-    } catch (e2) {
-      liftIcons = [];
-      problems.push(`Icons failed too (${esc(e2.message || e2)}).`);
+  // Flatten property sets into [{set, name, value, type}]
+  function flatten(obj) {
+    const out = [];
+    for (const set of obj?.properties || []) {
+      for (const p of set.properties || []) out.push({ set: set.name, name: p.name, value: p.value, type: p.type });
     }
+    return out;
   }
 
-  // 2. Labels and 3. sling lines – optional extras, failures don't stop the points.
-  if ($("labels").checked) {
-    const up = Math.max(0.3, (result.box.max.z - result.box.min.z) * 0.5); // leader length (m)
-    try {
-      ids.push(...await addMarkups("addTextMarkup", lift.points.map((p, i) => ({
-        color: LIFT_COLOR, start: mm(p), end: mm({ x: p.x, y: p.y, z: p.z + up }), text: `${p.label} ${kg(lift.shares.kg[i])}`,
-      }))));
-    } catch (e) { problems.push(`Labels failed (${esc(e.message || e)}).`); }
-  }
-  if (lift.slings) {
-    try {
-      ids.push(...await addMarkups("addLineMarkups", lift.points.map((p) => ({ color: LIFT_COLOR, start: mm(p), end: mm(lift.slings.hook) }))));
-    } catch (e) { problems.push(`Sling lines failed (${esc(e.message || e)}).`); }
-  }
-  liftIds = ids;
+  // Lifting should use the heaviest credible figure, so gross beats plain beats net.
+  const rank = (name) => (/gross/i.test(name) ? 3 : /net/i.test(name) ? 1 : 2);
 
-  const where = lift.points.map((p) => `${p.label} (${f(p.x, 2)}, ${f(p.y, 2)}, ${f(p.z, 2)})`).join(", ");
-  log(`Lifting points drawn: ${where}`);
-  if (problems.length) {
-    problems.forEach((p) => log(p.replace(/<[^>]+>/g, "")));
-    liftStatus(problems.join("<br>"), "err-text small");
-  } else {
-    liftStatus(`Showing ${lift.points.length} lifting point${lift.points.length > 1 ? "s" : ""} in blue.`, "ok-text");
+  function best(candidates) {
+    candidates.sort((a, b) => rank(b.name) - rank(a.name) || b.value - a.value);
+    return candidates[0] || null;
   }
-}
 
-async function clearLift() {
-  if (liftIds.length) await API.markup.removeMarkups(liftIds).catch(() => {});
-  liftIds = [];
-  if (liftIcons.length) await API.viewer.removeIcon(liftIcons).catch(() => {});
-  liftIcons = [];
-  await sweepMarkups(LIFT_COLOR);
-}
-
-// ---------- rendering ----------
-function render() {
-  renderResult();
-  renderLift();
-  renderElements();
-}
-
-function renderLift() {
-  if (!lift) {
-    $("liftResult").innerHTML = '<span class="muted">Select elements with a known weight to plan lifting points.</span>';
-    return;
+  /** Mass in kg: weight/mass property first, else volume × density. */
+  function findMass(obj, densityKgM3) {
+    const props = flatten(obj);
+    const massProps = props
+      .filter((p) => /(weight|mass)/i.test(p.name) && !/(per|\/)/i.test(p.name)) // skip "weight per metre"
+      .map((p) => ({ ...p, value: num(p.value) }))
+      .filter((p) => p.value !== null && p.value > 0 && (p.type === PT.Mass || p.type === undefined));
+    const m = best(massProps);
+    if (m) {
+      return { kg: m.value, source: `${m.set} › ${m.name}` + (m.type === undefined ? " (assumed kg)" : "") };
+    }
+    const volProps = props
+      .filter((p) => /volume/i.test(p.name) && p.type === PT.Volume)
+      .map((p) => ({ ...p, value: num(p.value) }))
+      .filter((p) => p.value !== null && p.value > 0);
+    const v = best(volProps);
+    if (v && densityKgM3 > 0) {
+      return { kg: v.value * densityKgM3, source: `${v.set} › ${v.name} × ${densityKgM3} kg/m³` };
+    }
+    return { kg: null, source: "No weight or volume found" };
   }
-  const { points, shares, slings: sl, layout, notes } = lift;
-  const W = result.totalKg;
-  const head = `<tr><th>Point</th><th>X (m)</th><th>Y (m)</th><th>Z (m)</th><th>Load</th>${sl ? "<th>Sling</th><th>Angle*</th><th>Tension</th>" : ""}</tr>`;
-  const body = points.map((p, i) => {
-    const leg = sl?.legs[i];
-    return `<tr><td><span class="dot"></span>${p.label}</td><td>${f(p.x)}</td><td>${f(p.y)}</td><td>${f(p.z)}</td>
-      <td>${kg(shares.kg[i])}<div class="hint">${f((100 * shares.kg[i]) / W, 0)}%</div></td>
-      ${leg ? `<td>${f(leg.length, 2)} m</td><td class="${leg.angleFromHorizontal < 45 ? "err-text" : ""}">${f(leg.angleFromHorizontal, 0)}°</td><td>${kg(leg.tensionKg)}</td>` : ""}</tr>`;
-  }).join("");
 
-  const msgs = [];
-  if (!shares.stable) {
-    msgs.push(`<p class="err-text"><strong>Unstable:</strong> the centre of gravity is outside the lifting points${shares.offset > 0.005 ? ` (${f(shares.offset * 1000, 0)} mm off their line)` : ""}. The load will tilt or roll. Choose a different number of points or layout.</p>`);
-  } else if (points.length > 1) {
-    const spread = Math.max(...shares.kg) - Math.min(...shares.kg);
-    msgs.push(spread <= 0.01 * W
-      ? '<p class="ok-text">Balanced: every point carries an equal share and the hook sits directly above the COG.</p>'
-      : '<p class="warn-text">Loads are unequal because some points had to move onto an element – check the shares above.</p>');
+  /** COG from model properties (e.g. Tekla COG_X/Y/Z), LengthMeasure in mm → metres. */
+  function findCogProperty(obj) {
+    const props = flatten(obj).filter((p) => p.type === PT.Length);
+    const axis = {};
+    for (const p of props) {
+      const m = /(?:^|[^a-z])(?:cog|cent(?:er|re)[ _-]?of[ _-]?gravity)[ _-]?([xyz])$/i.exec(p.name);
+      const val = num(p.value);
+      if (m && val !== null) axis[m[1].toLowerCase()] = val / 1000;
+    }
+    return "x" in axis && "y" in axis && "z" in axis ? { x: axis.x, y: axis.y, z: axis.z } : null;
   }
-  if (!shares.determinate) {
-    msgs.push(`<p class="warn-text">With ${points.length} points the shares assume the load is shared evenly, e.g. through a spreader beam or equalising rigging. With fixed-length slings a rigid load may hang on fewer points – many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.</p>`);
-  }
-  if (sl?.legs.some((l) => l.angleFromHorizontal < 45)) {
-    msgs.push('<p class="err-text">Sling angle below 45° from horizontal – increase hook height or reduce point spacing.</p>');
-  }
-  for (const n of notes) msgs.push(`<p class="warn-text">${esc(n)}</p>`);
 
-  $("liftResult").innerHTML = `
-    <div class="hint">Layout: ${layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.</div>
-    <table class="lift">${head}${body}</table>
-    ${sl ? `<p class="hint">*Angle from horizontal. Hook at ${f(sl.hook.x)}, ${f(sl.hook.y)}, ${f(sl.hook.z)} m. Tension excludes rigging weight and dynamic factors.</p>` : ""}
-    ${msgs.join("")}`;
-}
-
-function renderResult() {
-  if (!result || !result.cog) {
-    $("result").innerHTML = rows.length
-      ? '<span class="err-text">No element has a usable weight. Enter weights below.</span>'
-      : '<span class="muted">Select the elements that will be lifted together.</span>';
-    return;
-  }
-  const { cog, totalKg, used, excluded, box } = result;
-  const approxCount = rows.filter((r) => r.kg > 0 && r.approx).length;
-  let rel = "";
-  if (box) {
-    const mid = COG.boxCentre(box);
-    rel = `
-      <tr><td>Offset from centre of selection (X, Y)</td><td>${f(cog.x - mid.x)} m, ${f(cog.y - mid.y)} m</td></tr>
-      <tr><td>Height above lowest point</td><td>${f(cog.z - box.min.z)} m</td></tr>
-      <tr><td>Selection extents (X × Y × Z)</td><td>${f(box.max.x - box.min.x, 2)} × ${f(box.max.y - box.min.y, 2)} × ${f(box.max.z - box.min.z, 2)} m</td></tr>`;
-  }
-  $("result").innerHTML = `
-    <div class="big">${kg(totalKg)}</div>
-    <table class="result">
-      <tr><td>COG X</td><td><strong>${f(cog.x)} m</strong></td></tr>
-      <tr><td>COG Y</td><td><strong>${f(cog.y)} m</strong></td></tr>
-      <tr><td>COG Z</td><td><strong>${f(cog.z)} m</strong></td></tr>
-      ${rel}
-      <tr><td>Elements used</td><td>${used}${excluded ? ` <span class="err-text">(${excluded} excluded – no weight)</span>` : ""}</td></tr>
-    </table>
-    <p class="hint">Place the hook directly above (COG X, COG Y).</p>
-    ${approxCount ? `<p class="warn-text">${approxCount} element(s) use the bounding-box centre as their centre of gravity. This is only accurate for symmetric parts.</p>` : ""}`;
-}
-
-function renderElements() {
-  if (!rows.length) { $("elements").innerHTML = '<span class="muted">Nothing selected.</span>'; return; }
-  const body = rows.map((r, i) => `
-    <tr class="${r.kg > 0 ? "" : "missing"}">
-      <td><div class="el-name">${esc(r.name)}</div>
-          <div class="hint">${esc(r.massSource)}</div>
-          <div class="hint">${esc(r.centreSource)}${r.approx ? ' <span class="tag">approx</span>' : ""}</div></td>
-      <td class="num"><input type="number" min="0" step="0.1" data-i="${i}" value="${r.kg > 0 ? +r.kg.toFixed(1) : ""}" placeholder="kg" />
-          ${r.override ? `<button class="link" data-reset="${i}">auto</button>` : ""}</td>
-    </tr>`).join("");
-  $("elements").innerHTML = `<table class="elements"><thead><tr><th>Element</th><th class="num">Weight (kg)</th></tr></thead><tbody>${body}</tbody></table>`;
-
-  $("elements").querySelectorAll("input[data-i]").forEach((inp) => {
-    inp.onchange = () => {
-      const r = rows[+inp.dataset.i];
-      const v = parseFloat(inp.value);
-      const key = `${r.modelId}:${r.id}`;
-      if (Number.isFinite(v) && v >= 0) overrides.set(key, v); else overrides.delete(key);
-      recalc();
+  function scaleBox(box, s) {
+    return {
+      min: { x: box.min.x * s, y: box.min.y * s, z: box.min.z * s },
+      max: { x: box.max.x * s, y: box.max.y * s, z: box.max.z * s },
     };
-  });
-  $("elements").querySelectorAll("button[data-reset]").forEach((b) => {
-    b.onclick = () => { const r = rows[+b.dataset.reset]; overrides.delete(`${r.modelId}:${r.id}`); recalc(); };
-  });
-}
-
-// ---------- actions ----------
-async function showMarker() {
-  if (!result?.cog) return log("Nothing to mark yet.");
-  await clearMarker();
-  // Single point measurement markup (same as the viewer's Measure → Single point tool).
-  // MarkupPick positions are in millimetres; result.cog is in metres.
-  const [id] = await addMarkups("addSinglePointMarkups", [{ color: MARKER_COLOR, start: mm(result.cog) }]);
-  markerId = id ?? null;
-  log(`COG point placed at ${f(result.cog.x)}, ${f(result.cog.y)}, ${f(result.cog.z)} m`);
-}
-
-async function clearMarker() {
-  // Only removes our own (pink) COG point – the user's other measurements are left alone.
-  if (markerId != null) await API.markup.removeMarkups([markerId]).catch(() => {});
-  markerId = null;
-  await sweepMarkups(MARKER_COLOR);
-}
-
-async function fit() {
-  if (!selection.length) return;
-  await API.viewer.setCamera({ modelObjectIds: selection }, { animationTime: 400 });
-}
-
-async function copyResult() {
-  if (!result?.cog) return;
-  const lines = [
-    `Lift COG – ${new Date().toLocaleString()}`,
-    `Total weight: ${kg(result.totalKg)} (${result.used} elements${result.excluded ? `, ${result.excluded} excluded` : ""})`,
-    `COG: X ${f(result.cog.x)} m, Y ${f(result.cog.y)} m, Z ${f(result.cog.z)} m`,
-    "",
-    "Element\tWeight (kg)\tWeight source\tCentre source",
-    ...rows.map((r) => `${r.name}\t${r.kg > 0 ? r.kg.toFixed(1) : "-"}\t${r.massSource}\t${r.centreSource}`),
-  ];
-  if (lift) {
-    const sl = lift.slings;
-    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
-      `Point\tX (m)\tY (m)\tZ (m)\tLoad (kg)${sl ? "\tSling (m)\tAngle from horizontal (°)\tTension (kg)" : ""}`,
-      ...lift.points.map((p, i) => [p.label, p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3), lift.shares.kg[i].toFixed(1),
-        ...(sl ? [sl.legs[i].length.toFixed(2), sl.legs[i].angleFromHorizontal.toFixed(0), sl.legs[i].tensionKg.toFixed(1)] : [])].join("\t")));
-    if (!lift.shares.determinate) lines.push("Note: shares assume even load sharing (spreader beam / equalising rigging).");
   }
-  await navigator.clipboard.writeText(lines.join("\n")).then(
-    () => log("Result copied to clipboard"),
-    () => log("Clipboard blocked – check the Log for the text") || log(lines.join("\n")),
-  );
-}
 
-// ---------- boot ----------
-async function main() {
-  try {
-    API = await TrimbleConnectWorkspace.connect(window.parent, onEvent, 30000);
-    setStatus("Connected", "ok");
-    log(`Lift COG v${VERSION} connected`);
-    await loadSelection(await API.viewer.getSelection());
-  } catch (e) {
-    setStatus("Not connected", "err");
-    log("Could not connect – open this page inside the Trimble Connect 3D Viewer.", String(e));
+  const boxCentre = (b) => ({ x: (b.min.x + b.max.x) / 2, y: (b.min.y + b.max.y) / 2, z: (b.min.z + b.max.z) / 2 });
+
+  function inside(p, b, tol) {
+    return ["x", "y", "z"].every((k) => p[k] >= b.min[k] - tol && p[k] <= b.max[k] + tol);
   }
-}
 
-$("btnMarker").onclick = () => showMarker().catch((e) => log("COG marker failed:", String(e)));
-$("btnClear").onclick = () => clearMarker().catch((e) => log(String(e)));
-$("btnFit").onclick = () => fit().catch((e) => log(String(e)));
-$("btnCopy").onclick = () => copyResult().catch((e) => log(String(e)));
-$("btnLift").onclick = () => { liftVisible = true; drawLift().catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }); };
-$("version").textContent = `v${VERSION}`;
-$("btnLiftClear").onclick = () => { liftVisible = false; clearLift().then(() => liftStatus("Lifting points hidden.")).catch((e) => log(String(e))); };
-$("density").onchange = recalc;
-$("units").onchange = recalc;
-for (const id of ["nPoints", "layout", "hookHeight", "labels"]) $(id).onchange = recalc;
+  /** Per-object centroid: model COG property if it sits inside the object's box, else box centre. */
+  function findCentre(obj, box) {
+    const prop = findCogProperty(obj);
+    if (prop && box) {
+      if (inside(prop, box, 0.05)) return { point: prop, source: "COG property", approximate: false };
+      return { point: boxCentre(box), source: "Box centre (COG property outside object – ignored)", approximate: true };
+    }
+    if (prop && !box) return { point: prop, source: "COG property", approximate: false };
+    if (box) return { point: boxCentre(box), source: "Box centre", approximate: true };
+    return { point: null, source: "No geometry", approximate: true };
+  }
 
-main();
+  /** items: [{kg, point}] → { totalKg, cog, used, excluded } */
+  function combine(items) {
+    let M = 0, x = 0, y = 0, z = 0, used = 0, excluded = 0;
+    for (const it of items) {
+      if (!(it.kg > 0) || !it.point) { excluded++; continue; }
+      M += it.kg; x += it.kg * it.point.x; y += it.kg * it.point.y; z += it.kg * it.point.z; used++;
+    }
+    return { totalKg: M, cog: M > 0 ? { x: x / M, y: y / M, z: z / M } : null, used, excluded };
+  }
+
+  function unionBox(boxes) {
+    const bs = boxes.filter(Boolean);
+    if (!bs.length) return null;
+    const min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity };
+    for (const b of bs) for (const k of ["x", "y", "z"]) {
+      min[k] = Math.min(min[k], b.min[k]); max[k] = Math.max(max[k], b.max[k]);
+    }
+    return { min, max };
+  }
+
+  // ======================= Lifting points =======================
+  // All coordinates in metres. Plan = X/Y, Z up. Layout is aligned to the longer plan
+  // axis of the selection's (axis-aligned) bounding box.
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const inPlan = (p, b, tol) => p.x >= b.min.x - tol && p.x <= b.max.x + tol && p.y >= b.min.y - tol && p.y <= b.max.y + tol;
+  const planDist = (p, b) => Math.hypot(Math.max(b.min.x - p.x, 0, p.x - b.max.x), Math.max(b.min.y - p.y, 0, p.y - b.max.y));
+
+  // Evenly spaced offsets symmetric about 0. For 2 points use the 0.207L-from-ends rule
+  // (minimises bending in a uniform beam); otherwise one bay per point with half-bay overhangs.
+  function rowOffsets(count, length, room) {
+    if (count === 1) return [0];
+    const half = count === 2 ? (0.5 - 0.2071) * length : (length / count) * (count - 1) / 2;
+    const h = Math.max(0, Math.min(half, room));
+    return Array.from({ length: count }, (_, i) => -h + (2 * h * i) / (count - 1));
+  }
+
+  /**
+   * Proposes N lifting points arranged symmetrically about the COG (equal loads on a rigid body),
+   * then drops each one onto the top of the element underneath it.
+   * opts: { cog, boxes: Box[], n, layout: "auto"|"line"|"area" }
+   */
+  function planLiftPoints({ cog, boxes, n, layout = "auto" }) {
+    const bs = boxes.filter(Boolean);
+    const ub = unionBox(bs);
+    if (!ub || !cog || !(n >= 1)) return null;
+
+    const Lx = ub.max.x - ub.min.x, Ly = ub.max.y - ub.min.y;
+    const U = Lx >= Ly ? "x" : "y", V = U === "x" ? "y" : "x";
+    const Lu = ub.max[U] - ub.min[U], Lv = ub.max[V] - ub.min[V];
+    const uc = cog[U], vc = cog[V];
+    const mu = Math.max(0.05, 0.02 * Lu), mv = Math.max(0.05, 0.05 * Lv); // keep clear of edges
+    const roomU = Math.max(0, Math.min(uc - ub.min[U], ub.max[U] - uc) - mu);
+    const roomV = Math.max(0, Math.min(vc - ub.min[V], ub.max[V] - vc) - mv);
+
+    let used = n === 1 ? "single" : n === 2 ? "line" : layout === "auto" ? (Lv >= 0.25 * Lu && roomV > 0.1 ? "area" : "line") : layout;
+    const notes = [];
+    if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Selection is too narrow to spread points across its width – placed in a line instead."); }
+
+    let uv = [];
+    if (used === "single") uv = [[0, 0]];
+    else if (used === "line") uv = rowOffsets(n, Lu, roomU).map((du) => [du, 0]);
+    else if (n === 3) {
+      // Isosceles triangle with its centroid on the COG: two points behind, apex in front (more room side).
+      const s = ub.max[U] - uc >= uc - ub.min[U] ? 1 : -1;
+      const back = s > 0 ? uc - ub.min[U] - mu : ub.max[U] - uc - mu;
+      const front = s > 0 ? ub.max[U] - uc - mu : uc - ub.min[U] - mu;
+      const p = Math.max(0, Math.min(0.25 * Lu, back, front / 2));
+      const q = Math.min(0.2929 * Lv, roomV);
+      uv = [[-s * p, -q], [-s * p, q], [2 * s * p, 0]];
+    } else {
+      // Two rows either side of the COG (4 → 2×2, 6 → 2×3, 8 → 2×4).
+      const cols = rowOffsets(Math.ceil(n / 2), Lu, roomU);
+      const dv = Math.min(0.2929 * Lv, roomV);
+      for (const du of cols) uv.push([du, -dv], [du, dv]);
+    }
+
+    const points = uv.map(([du, dv], i) => {
+      let p = { [U]: uc + du, [V]: vc + dv };
+      let snapped = false;
+      let hits = bs.filter((b) => inPlan(p, b, 0.001));
+      if (!hits.length) {
+        // Gap between elements – move the point onto the nearest element.
+        const near = bs.reduce((a, b) => (planDist(p, b) < planDist(p, a) ? b : a));
+        p = { x: clamp(p.x, near.min.x, near.max.x), y: clamp(p.y, near.min.y, near.max.y) };
+        hits = [near]; snapped = true;
+      }
+      const z = Math.max(...hits.map((b) => b.max.z)); // top surface
+      return { label: `P${i + 1}`, x: p.x, y: p.y, z, snapped };
+    });
+    if (points.some((p) => p.snapped)) notes.push("Some points fell in a gap between elements and were moved onto the nearest element – loads recalculated.");
+    return { points, layout: used, axis: U, notes };
+  }
+
+  // Solve small dense system (Gaussian elimination, partial pivoting). Returns null if singular.
+  function solve(M, b) {
+    const n = b.length, A = M.map((r, i) => [...r, b[i]]);
+    for (let c = 0; c < n; c++) {
+      let piv = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+      if (Math.abs(A[piv][c]) < 1e-12) return null;
+      [A[c], A[piv]] = [A[piv], A[c]];
+      for (let r = 0; r < n; r++) if (r !== c) {
+        const k = A[r][c] / A[c][c];
+        for (let j = c; j <= n; j++) A[r][j] -= k * A[c][j];
+      }
+    }
+    return A.map((r, i) => r[n] / r[i]);
+  }
+
+  /**
+   * Vertical load at each point for a rigid load hanging with the hook over the COG.
+   * Uses the minimum-norm (most even) solution of the equilibrium equations, which is exact
+   * for 1, 2 and 3 non-collinear points and an even-sharing assumption beyond that.
+   */
+  function loadShares(points, cog, W) {
+    const n = points.length, tol = 0.005; // 5 mm
+    const res = { kg: [], stable: true, determinate: true, offset: 0 };
+    if (!n || !(W > 0)) return res;
+    const dx = points.map((p) => p.x - cog.x), dy = points.map((p) => p.y - cog.y);
+
+    if (n === 1) {
+      res.offset = Math.hypot(dx[0], dy[0]);
+      res.stable = res.offset <= Math.max(tol, 0.01);
+      res.kg = [W];
+      return res;
+    }
+
+    // Are the points (nearly) on one line? Principal axis of the plan positions.
+    const mx = dx.reduce((a, b) => a + b) / n, my = dy.reduce((a, b) => a + b) / n;
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < n; i++) { const a = dx[i] - mx, b = dy[i] - my; sxx += a * a; syy += b * b; sxy += a * b; }
+    const tr = sxx + syy, det = sxx * syy - sxy * sxy;
+    const l1 = tr / 2 + Math.sqrt(Math.max(0, (tr * tr) / 4 - det)), l2 = tr - l1;
+    const collinear = l2 <= 1e-6 * Math.max(l1, 1e-12) || n === 2;
+
+    let rows;
+    if (collinear) {
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      const ux = Math.cos(ang), uy = Math.sin(ang);
+      res.offset = Math.abs(-mx * uy + my * ux); // COG distance from the line of points
+      if (res.offset > tol) res.stable = false;
+      rows = [points.map(() => 1), dx.map((x, i) => x * ux + dy[i] * uy)];
+      if (n > 2) res.determinate = false;
+    } else {
+      rows = [points.map(() => 1), dx, dy];
+      if (n > 3) res.determinate = false;
+    }
+    const b = [W, ...rows.slice(1).map(() => 0)];
+    const M = rows.map((r) => rows.map((s) => r.reduce((acc, v, i) => acc + v * s[i], 0)));
+    const lam = solve(M, b);
+    if (!lam) { res.stable = false; res.kg = points.map(() => W / n); return res; }
+    res.kg = points.map((_, i) => rows.reduce((acc, r, k) => acc + r[i] * lam[k], 0));
+    if (res.kg.some((v) => v < -1e-6 * W)) res.stable = false; // COG outside the lifting points
+    return res;
+  }
+
+  /** Sling geometry for a single hook directly above the COG, `height` metres above the highest point. */
+  function slings(points, cog, height, kgShares) {
+    if (!(height > 0) || !points.length) return null;
+    const hook = { x: cog.x, y: cog.y, z: Math.max(...points.map((p) => p.z)) + height };
+    const legs = points.map((p, i) => {
+      const h = Math.hypot(hook.x - p.x, hook.y - p.y), v = hook.z - p.z;
+      const len = Math.hypot(h, v);
+      const fromHorizontal = (Math.atan2(v, h) * 180) / Math.PI;
+      return { length: len, angleFromHorizontal: fromHorizontal, tensionKg: v > 0 ? (kgShares[i] * len) / v : Infinity };
+    });
+    return { hook, legs };
+  }
+
+  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, loadShares, slings };
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else root.COG = api;
+})(this);
