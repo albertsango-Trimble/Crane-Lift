@@ -40,3 +40,14 @@ tr.missing td.num input { border-color: var(--err); }
 .el-name { font-weight: 600; }
 .tag { background: #fde8c8; color: #7a4a00; border-radius: 3px; padding: 0 4px; font-size: 10px; }
 button.link { background: none; color: var(--accent); padding: 0 2px; font-size: 11px; text-decoration: underline; }
+
+/* Lifting points */
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 4px 0 10px; }
+button.blue { background: #0078ff; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #0078ff; margin-right: 4px; vertical-align: middle; }
+table.lift th { text-align: right; font-size: 11px; color: var(--muted); font-weight: 600; padding: 2px 4px; white-space: nowrap; }
+table.lift th:first-child, table.lift td:first-child { text-align: left; }
+table.lift td { text-align: right; white-space: nowrap; }
+table.lift td:first-child { width: auto; color: var(--fg); font-weight: 600; }
+.ok-text { color: var(--ok); font-size: 12px; }
