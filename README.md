@@ -9,7 +9,8 @@ Works out the **combined centre of gravity (COG)** of the elements selected in t
 2. Select every element that will be lifted together (Ctrl/Shift-click, or select an assembly).
 3. The panel shows the total weight and COG X / Y / Z in metres (model coordinates).
 4. **Show marker** places a pink **single point measurement** at the COG in the 3D view (the same markup as Measure → Single point, so it shows the coordinates and appears in the measurement list). **Clear marker** removes only that point, not your other measurements.
-5. **Lifting points:** choose 1, 2, 3, 4, 6 or 8 points and a layout, then **Show lifting points**. Blue single-point markups appear on top of the elements, labelled with the load each one carries. They update automatically when you change the selection or settings. **Clear lifting points** removes them.
+5. **Lifting points:** choose 1, 2, 3, 4, 6 or 8 points and a layout, and blue single-point markups appear on top of the elements, labelled with the load each one carries. They update automatically when you change the selection or settings. **Hide lifting points** removes them.
+   - **Sloped or diagonal elements** (rafters, raking beams, braces): the panel asks you to **trace** the element instead of drawing points in mid-air. Click **Trace element (2 clicks)**, then click the top of the element near each end. If clicks aren't picked up, place two **Measure → Single point** measurements on the top of the element and press **Use 2 measured points**.
 6. **Copy result** copies a summary, the per-element table and the lifting points (paste into Excel or the lift plan).
 
 ## How it calculates
@@ -32,7 +33,10 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - **3 points:** a triangle with its centroid on the COG (wide loads), or a line (narrow loads).
 - **4, 6, 8 points:** two rows either side of the COG (wide loads), or a line (narrow loads).
 - **Layout → Auto** spreads points over the footprint when the load is at least a quarter as wide as it is long; otherwise it puts them in a line. You can force either.
-- Each point is dropped onto the **top of the element below it**. A point that lands in a gap between elements is moved onto the nearest element, and the loads are recalculated from the actual positions.
+- **Flat, square-on loads:** each point is dropped onto the **top of the element below it** (from its bounding box).
+- **Traced loads:** points follow the traced line: its direction, its slope and the height of the top surface. The line is moved sideways so it passes over the COG, so points stay symmetric and loads stay equal. Points are placed along the full member length, even if your clicks weren't right at the ends.
+- An element is treated as sloped when its box is over 1 m tall and taller than 15% of its length, and as diagonal when its box is wide relative to its length. In those cases points are not drawn until it is traced.
+- A point that lands in a gap between elements is moved onto the nearest element, and the loads are recalculated from the actual positions.
 - **Load per point** is the most even split that keeps the load level (exact for 1, 2 and 3 points). With 4+ points, or 3+ in a line, the panel warns that equal shares assume a spreader beam or equalising rigging. Many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.
 - If the COG falls outside the lifting points, the panel shows **Unstable**.
 - **Hook height (optional):** draws sling lines to a hook above the COG and gives each leg's length, angle from horizontal and tension. Angles below 45° are flagged. Tensions exclude rigging weight and dynamic factors.
@@ -41,7 +45,8 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - **Tekla:** add `WEIGHT_GROSS` and `COG_X/Y/Z` to the IFC export's property sets so both weight and true centre of gravity come through.
 - If the marker lands far away from the selection, change **Viewer coordinate units**.
 - If you select an assembly *and* its parts, it can be counted twice. Select one or the other and check the element list.
-- The layout follows the X or Y axis of the model. For loads rotated in plan (e.g. a beam at 30°), use **Along length** with care and check the points sit on the element.
+- Untraced layouts follow the X or Y axis of the model. If a load is rotated in plan but not flagged, use **Trace element** anyway – it works for any straight member.
+- Trace along the **top** of the element. Points are placed at the height of the line you trace.
 - Lifting accessories (spreader bars, slings, shackles) are not in the model. Add their weight to the lift plan separately.
 
 ## Files
@@ -52,7 +57,7 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 | `app.js` | Viewer wiring (selection, properties, bounding boxes, markups) |
 | `cog.js` | Pure COG and lifting-point maths, no viewer dependency |
 | `test-cog.js` | `node test-cog.js` – unit tests for the COG and lifting-point maths |
-| `icon.svg` | Panel icon |
+| `lift.svg`, `icon.svg` | Fallback lifting-point icon, panel icon |
 
 ## Deploy
 1. Host the folder on any **HTTPS** static host (GitHub Pages, Netlify, Azure Static Web Apps…).
