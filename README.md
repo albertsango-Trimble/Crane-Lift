@@ -10,7 +10,7 @@ Works out the **combined centre of gravity (COG)** of the elements selected in t
 3. The panel shows the total weight and COG X / Y / Z in metres (model coordinates).
 4. **Show marker** places a pink **single point measurement** at the COG in the 3D view (the same markup as Measure → Single point, so it shows the coordinates and appears in the measurement list). **Clear marker** removes only that point, not your other measurements.
 5. **Lifting points:** choose 1, 2, 3, 4, 6 or 8 points and a layout, and blue single-point markups appear on top of the elements, labelled with the load each one carries. They update automatically when you change the selection or settings. **Hide lifting points** removes them.
-   - **Sloped or diagonal elements** (rafters, raking beams, braces): the panel asks you to **trace** the element instead of drawing points in mid-air. Click **Trace element (2 clicks)**, then click the top of the element near each end. If clicks aren't picked up, place two **Measure → Single point** measurements on the top of the element and press **Use 2 measured points**.
+   - **Sloped, diagonal or curved elements** (rafters, raking beams, braces, cambered or vertically curved beams): the panel asks you to **trace** the element instead of drawing points in mid-air. Click **Trace element**, then click the top of the element near each end. The points update after the second click. **For a curved element, keep clicking points along the top** (at least one near the middle), then press **Finish trace**. If clicks aren't picked up, place **Measure → Single point** measurements along the top of the element and press **Use measured points**.
 6. **Copy result** copies a summary, the per-element table and the lifting points (paste into Excel or the lift plan).
 
 ## How it calculates
@@ -34,7 +34,7 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - **4, 6, 8 points:** two rows either side of the COG (wide loads), or a line (narrow loads).
 - **Layout → Auto** spreads points over the footprint when the load is at least a quarter as wide as it is long; otherwise it puts them in a line. You can force either.
 - **Flat, square-on loads:** each point is dropped onto the **top of the element below it** (from its bounding box).
-- **Traced loads:** points follow the traced line: its direction, its slope and the height of the top surface. The line is moved sideways so it passes over the COG, so points stay symmetric and loads stay equal. Points are placed along the full member length, even if your clicks weren't right at the ends.
+- **Traced loads:** points follow the traced profile: its direction in plan and the height of the top surface. With 2 trace points the profile is a straight line. With 3 or more it is a parabola (the shape of a road or bridge vertical curve). If a parabola doesn't fit within 3 cm, it runs straight between your clicks instead. The line is moved sideways so it passes over the COG, so points stay symmetric and loads stay equal. Points are placed along the full member length, even if your clicks weren't right at the ends.
 - An element is treated as sloped when its box is over 1 m tall and taller than 15% of its length, and as diagonal when its box is wide relative to its length. In those cases points are not drawn until it is traced.
 - A point that lands in a gap between elements is moved onto the nearest element, and the loads are recalculated from the actual positions.
 - **Load per point** is the most even split that keeps the load level (exact for 1, 2 and 3 points). With 4+ points, or 3+ in a line, the panel warns that equal shares assume a spreader beam or equalising rigging. Many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.
@@ -46,7 +46,10 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - If the marker lands far away from the selection, change **Viewer coordinate units**.
 - If you select an assembly *and* its parts, it can be counted twice. Select one or the other and check the element list.
 - Untraced layouts follow the X or Y axis of the model. If a load is rotated in plan but not flagged, use **Trace element** anyway – it works for any straight member.
-- Trace along the **top** of the element. Points are placed at the height of the line you trace.
+- Trace along the **top** of the element. Points are placed at the height of the profile you trace.
+- For curved elements, click near both ends and at least once in the middle. Points beyond your outermost clicks have their height extrapolated, and the panel says so.
+- The trace is straight in plan. Elements curved in plan (horizontal curves) aren't supported yet.
+- For a curved element without a COG property, the COG is the centre of its bounding box. That is close for symmetric curves but not exact.
 - Lifting accessories (spreader bars, slings, shackles) are not in the model. Add their weight to the lift plan separately.
 
 ## Files
