@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "1.5.1";
+const VERSION = "1.6.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -407,8 +407,8 @@ function renderLift() {
 
   $("liftResult").innerHTML = `
     <div class="hint">${lift.axis === "traced"
-      ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope${lift.curve === "curved" ? `, curved: top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : ""}, traced from ${lift.tracePoints} points). Layout: ${layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
-      : `Layout: ${layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.`}</div>
+      ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope${lift.curve === "curved" ? `, curved: top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : ""}, traced from ${lift.tracePoints} points). Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
+      : `Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.`}</div>
     <table class="lift">${head}${body}</table>
     ${sl ? `<p class="hint">*Angle from horizontal. Hook at ${f(sl.hook.x)}, ${f(sl.hook.y)}, ${f(sl.hook.z)} m. Tension excludes rigging weight and dynamic factors.</p>` : ""}
     ${msgs.join("")}`;
