@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -33,15 +33,38 @@ const density = () => parseFloat($("density").value) || 0;
 
 // ---------- events ----------
 let timer = null;
+const keyOf = (sel) => (Array.isArray(sel) ? sel : [])
+  .filter((m) => m.objectRuntimeIds?.length)
+  .map((m) => `${m.modelId}:${[...m.objectRuntimeIds].sort((x, y) => x - y).join(",")}`).sort().join("|");
+
 function onEvent(event, args) {
   if (event === "viewer.onSelectionChanged") {
-    if (picking) return; // clicks made while tracing must not change what is being lifted
     const sel = args?.data ?? args ?? [];
-    clearTimeout(timer);
-    timer = setTimeout(() => loadSelection(sel).catch((e) => log("Error:", String(e))), 250);
+    if (picking) {
+      // Clicks made while tracing can re-select or clear the traced element – ignore those.
+      // Selecting a different element means the user has moved on: end the trace and follow them.
+      const k = keyOf(sel);
+      if (!k || k === picking.key) return;
+      finishTrace();
+    }
+    queueSelection(sel);
   } else if (event === "viewer.onPicked") {
     onPicked(args?.data ?? args);
   }
+}
+
+function queueSelection(sel) {
+  clearTimeout(timer);
+  timer = setTimeout(() => loadSelection(sel).catch((e) => log("Error:", String(e))), 250);
+}
+
+// Re-read the viewer's current selection (after tracing, or from the Refresh button).
+async function resyncSelection() {
+  if (!API) return;
+  const sel = await API.viewer.getSelection().catch(() => null);
+  const k = keyOf(sel);
+  // An empty selection here usually means tracing clicks cleared it – keep the traced element.
+  if (k && k !== selectionKey()) queueSelection(sel);
 }
 
 // ---------- tracing a sloped / skewed element ----------
@@ -51,7 +74,7 @@ let trace = null;   // { key, a, b, source } in metres, tied to one selection
 let picking = null; // { key, pts: [] } while waiting for clicks
 let pickTimeout = null;
 
-const selectionKey = () => selection.map((m) => `${m.modelId}:${[...m.objectRuntimeIds].sort((x, y) => x - y).join(",")}`).sort().join("|");
+const selectionKey = () => keyOf(selection);
 const activeTrace = () => (trace && trace.key === selectionKey() ? trace : null);
 
 function traceStatus(html, cls = "hint") { $("traceStatus").className = cls; $("traceStatus").innerHTML = html; }
@@ -96,11 +119,13 @@ function finishTrace() {
 }
 
 function cancelTrace(msg, cls = "hint") {
+  const wasPicking = !!picking;
   picking = null;
   clearTimeout(pickTimeout);
   $("btnTrace").textContent = TRACE_LABEL;
   API?.viewer.activateTool("reset").catch(() => {});
   if (msg) traceStatus(msg, cls);
+  if (wasPicking) setTimeout(() => resyncSelection(), 300); // catch any selection change made while tracing
 }
 
 function onPicked(data) {
@@ -161,19 +186,21 @@ function clearTrace() {
 }
 
 // ---------- data loading ----------
+let loadSeq = 0; // only the most recent selection load is allowed to update the panel
+
 async function loadSelection(sel) {
-  selection = Array.isArray(sel) ? sel.filter((m) => m.objectRuntimeIds?.length) : [];
-  const total = selection.reduce((n, m) => n + m.objectRuntimeIds.length, 0);
+  const seq = ++loadSeq;
+  const newSel = Array.isArray(sel) ? sel.filter((m) => m.objectRuntimeIds?.length) : [];
+  const total = newSel.reduce((n, m) => n + m.objectRuntimeIds.length, 0);
   $("selCount").textContent = total;
-  rows = [];
-  if (!total) return recalc(); // clears the result, lifting plan and (if shown) lifting markups
-  if (total > MAX_OBJECTS) {
-    log(`${total} objects selected – only the first ${MAX_OBJECTS} are used.`);
-  }
+  log(`Selection: ${total} object${total === 1 ? "" : "s"}`);
+  if (!total) { selection = []; rows = []; return recalc(); } // clears the result, plan and markups
+  if (total > MAX_OBJECTS) log(`${total} objects selected – only the first ${MAX_OBJECTS} are used.`);
 
   $("elements").innerHTML = '<span class="muted">Reading properties…</span>';
+  const newRows = [];
   let budget = MAX_OBJECTS;
-  for (const { modelId, objectRuntimeIds } of selection) {
+  for (const { modelId, objectRuntimeIds } of newSel) {
     const ids = objectRuntimeIds.slice(0, budget);
     budget -= ids.length;
     if (!ids.length) break;
@@ -181,10 +208,14 @@ async function loadSelection(sel) {
       API.viewer.getObjectProperties(modelId, ids).catch((e) => (log("Properties failed:", String(e)), [])),
       API.viewer.getObjectBoundingBoxes(modelId, ids).catch((e) => (log("Bounding boxes failed:", String(e)), [])),
     ]);
-    const propById = new Map(props.map((p) => [p.id, p]));
-    const boxById = new Map(boxes.map((b) => [b.id, b.boundingBox]));
-    for (const id of ids) rows.push({ modelId, id, obj: propById.get(id) || { id }, rawBox: boxById.get(id) || null });
+    if (seq !== loadSeq) return; // a newer selection arrived while we were waiting – drop this one
+    const propById = new Map((props || []).map((p) => [p.id, p]));
+    const boxById = new Map((boxes || []).map((b) => [b.id, b.boundingBox]));
+    for (const id of ids) newRows.push({ modelId, id, obj: propById.get(id) || { id }, rawBox: boxById.get(id) || null });
   }
+  if (seq !== loadSeq) return;
+  selection = newSel;
+  rows = newRows;
   recalc();
 }
 
@@ -207,7 +238,9 @@ function recalc() {
   planLift();
   render();
   if (liftVisible) scheduleLiftRedraw();
+  if (markerVisible) { clearTimeout(markerTimer); markerTimer = setTimeout(() => showMarker().catch((e) => log("COG marker failed:", String(e))), 300); }
 }
+let markerTimer = null;
 
 // ---------- lifting points ----------
 function planLift() {
@@ -438,9 +471,10 @@ function renderElements() {
 }
 
 // ---------- actions ----------
+let markerVisible = false; // when shown, the pink COG point follows the selection
 async function showMarker() {
-  if (!result?.cog) return log("Nothing to mark yet.");
   await clearMarker();
+  if (!result?.cog) return;
   // Single point measurement markup (same as the viewer's Measure → Single point tool).
   // MarkupPick positions are in millimetres; result.cog is in metres.
   const [id] = await addMarkups("addSinglePointMarkups", [{ color: MARKER_COLOR, start: mm(result.cog) }]);
@@ -497,8 +531,8 @@ async function main() {
   }
 }
 
-$("btnMarker").onclick = () => showMarker().catch((e) => log("COG marker failed:", String(e)));
-$("btnClear").onclick = () => clearMarker().catch((e) => log(String(e)));
+$("btnMarker").onclick = () => { markerVisible = true; if (!result?.cog) log("Nothing to mark yet."); showMarker().catch((e) => log("COG marker failed:", String(e))); };
+$("btnClear").onclick = () => { markerVisible = false; clearMarker().catch((e) => log(String(e))); };
 $("btnFit").onclick = () => fit().catch((e) => log(String(e)));
 $("btnCopy").onclick = () => copyResult().catch((e) => log(String(e)));
 $("btnLift").onclick = () => { liftVisible = true; drawLift().catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }); };
@@ -511,5 +545,10 @@ $("btnTrace").onclick = () => startTrace().catch((e) => cancelTrace(esc(String(e
 $("btnTrace").textContent = TRACE_LABEL;
 $("btnTraceMeasured").onclick = () => traceFromMeasurements().catch((e) => traceStatus(esc(String(e)), "err-text small"));
 $("btnTraceClear").onclick = clearTrace;
+$("btnRefresh").onclick = async () => {
+  if (picking) finishTrace();
+  const sel = await API?.viewer.getSelection().catch(() => null);
+  if (sel) queueSelection(sel);
+};
 
 main();
