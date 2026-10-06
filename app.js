@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -64,25 +64,41 @@ function toMetres(pos) {
   return k ? { x: pos.x * k, y: pos.y * k, z: pos.z * k } : null;
 }
 
+const TRACE_LABEL = "Trace element";
+const pickTool = (text) => API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – trace element", text } });
+
 async function startTrace() {
-  if (picking) return cancelTrace("Trace cancelled.");
+  if (picking) return finishTrace();
   if (!result?.box) return traceStatus("Select the element first.", "err-text small");
   picking = { key: selectionKey(), pts: [] };
-  $("btnTrace").textContent = "Cancel trace";
-  traceStatus("<strong>Click the top of the element near one end</strong> (1 of 2).", "warn-text");
-  clearTimeout(pickTimeout);
-  pickTimeout = setTimeout(() => picking && cancelTrace("Trace timed out. If clicks aren't being picked up, use <em>Use 2 measured points</em> instead."), 120000);
+  $("btnTrace").textContent = "Finish trace";
+  traceStatus("<strong>Click the top of the element near one end.</strong>", "warn-text");
+  armTimeout();
   try {
-    await API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – trace element", text: "Click the top of the element near one end" } });
+    await pickTool("Click the top of the element near one end");
   } catch (e) {
-    cancelTrace(`The viewer's picking tool isn't available (${esc(e.message || e)}). Use <em>Use 2 measured points</em> instead.`, "err-text small");
+    cancelTrace(`The viewer's picking tool isn't available (${esc(e.message || e)}). Use <em>Use measured points</em> instead.`, "err-text small");
   }
+}
+
+function armTimeout() {
+  clearTimeout(pickTimeout);
+  pickTimeout = setTimeout(() => picking && (picking.pts.length >= 2 ? finishTrace()
+    : cancelTrace("Trace timed out. If clicks aren't being picked up, use <em>Use measured points</em> instead.")), 120000);
+}
+
+// Stop listening for clicks. The trace made so far (2+ points) stays in use.
+function finishTrace() {
+  const n = picking?.pts.length || 0;
+  cancelTrace();
+  if (n < 2) return traceStatus("Trace cancelled – it needs at least 2 points.");
+  showTraceStatus();
 }
 
 function cancelTrace(msg, cls = "hint") {
   picking = null;
   clearTimeout(pickTimeout);
-  $("btnTrace").textContent = "Trace element (2 clicks)";
+  $("btnTrace").textContent = TRACE_LABEL;
   API?.viewer.activateTool("reset").catch(() => {});
   if (msg) traceStatus(msg, cls);
 }
@@ -94,35 +110,48 @@ function onPicked(data) {
   const p = toMetres(det.position);
   if (!p) return traceStatus("That click wasn't on the selected element – click its top surface.", "err-text small");
   picking.pts.push(p);
+  armTimeout();
   log(`Trace point ${picking.pts.length}: ${f(p.x)}, ${f(p.y)}, ${f(p.z)} m`);
   if (picking.pts.length === 1) {
-    traceStatus("<strong>Now click the top of the element near the other end</strong> (2 of 2).", "warn-text");
-    API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – trace element", text: "Now click the top near the other end" } }).catch(() => {});
+    traceStatus("<strong>Now click the top near the other end.</strong>", "warn-text");
+    pickTool("Now click the top near the other end").catch(() => {});
     return;
   }
-  setTrace(picking.key, picking.pts[0], picking.pts[1], "clicked");
-  cancelTrace();
+  // From the 2nd click on, apply the trace live; each extra click refines the curve.
+  setTrace(picking.key, picking.pts.slice(), "clicked");
+  traceStatus(`<strong>${picking.pts.length} points traced.</strong> Curved element? Keep clicking along the top (e.g. the middle) – the points update as you go. Press <em>Finish trace</em> when done.`, "warn-text");
+  pickTool("Click more points along the top, or press Finish trace").catch(() => {});
 }
 
-function setTrace(key, a, b, source) {
-  trace = { key, a, b, source };
-  const len = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
-  traceStatus(`Element traced (${source === "measured" ? "from your measured points" : "from your clicks"}, ${f(len, 2)} m). Points now follow the element.`, "ok-text");
+function setTrace(key, pts, source) {
+  trace = { key, pts, source };
   recalc();
+  if (!picking) showTraceStatus();
 }
 
-// Fallback: use the last two Single point measurements the user placed (MarkupPick positions are mm).
+function showTraceStatus() {
+  if (!trace) return;
+  const how = trace.source === "measured" ? "your measured points" : "your clicks";
+  if (lift?.error) return traceStatus(esc(lift.error), "err-text small");
+  const shape = lift?.curve === "curved" ? `curved, top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : "straight";
+  const tip = trace.pts.length === 2 ? " If the element is curved, trace again and click a third point near the middle." : "";
+  traceStatus(`Traced from ${trace.pts.length} of ${how} (${shape}). Points follow the element.${tip}`, "ok-text");
+}
+
+// Fallback: use the Single point measurements the user placed on the selection (positions are mm).
 async function traceFromMeasurements() {
   if (!result?.box) return traceStatus("Select the element first.", "err-text small");
   const list = await API.markup.getSinglePointMarkups().catch(() => []);
-  const mine = (Array.isArray(list) ? list : []).filter((m) => !sameColor(m.color, LIFT_COLOR) && !sameColor(m.color, MARKER_COLOR) && m.start);
-  const pts = mine.slice(-2).map((m) => ({ x: m.start.positionX / 1000, y: m.start.positionY / 1000, z: m.start.positionZ / 1000 }));
   const box = result.box;
   const onSel = (p) => ["x", "y", "z"].every((c) => p[c] >= box.min[c] - 1 && p[c] <= box.max[c] + 1);
-  if (pts.length < 2 || !pts.every(onSel)) {
-    return traceStatus("Place two <strong>Measure → Single point</strong> measurements on the top of the element, near each end, then press this again.", "err-text small");
+  const pts = (Array.isArray(list) ? list : [])
+    .filter((m) => m.start && !sameColor(m.color, LIFT_COLOR) && !sameColor(m.color, MARKER_COLOR))
+    .map((m) => ({ x: m.start.positionX / 1000, y: m.start.positionY / 1000, z: m.start.positionZ / 1000 }))
+    .filter(onSel);
+  if (pts.length < 2) {
+    return traceStatus("Place at least two <strong>Measure → Single point</strong> measurements on the top of the element (near each end, plus the middle if it's curved), then press this again.", "err-text small");
   }
-  setTrace(selectionKey(), pts[0], pts[1], "measured");
+  setTrace(selectionKey(), pts, "measured");
 }
 
 function clearTrace() {
@@ -188,7 +217,7 @@ function planLift() {
   const tr = activeTrace();
   let plan;
   if (tr) {
-    plan = COG.planOnAxis({ ...opts, a: tr.a, b: tr.b });
+    plan = COG.planOnAxis({ ...opts, pts: tr.pts });
     if (plan?.error) { lift = { error: plan.error }; return; }
   } else {
     // A bounding box is only a good stand-in for the top surface of flat, axis-aligned loads.
@@ -345,7 +374,7 @@ function renderLift() {
 
   $("liftResult").innerHTML = `
     <div class="hint">${lift.axis === "traced"
-      ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope). Layout: ${layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
+      ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope${lift.curve === "curved" ? `, curved: top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : ""}, traced from ${lift.tracePoints} points). Layout: ${layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
       : `Layout: ${layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.`}</div>
     <table class="lift">${head}${body}</table>
     ${sl ? `<p class="hint">*Angle from horizontal. Hook at ${f(sl.hook.x)}, ${f(sl.hook.y)}, ${f(sl.hook.z)} m. Tension excludes rigging weight and dynamic factors.</p>` : ""}
@@ -443,7 +472,7 @@ async function copyResult() {
   ];
   if (lift?.points) {
     const sl = lift.slings;
-    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout}${lift.axis === "traced" ? `, along traced element, ${lift.slopeDeg.toFixed(1)}° slope` : ""})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
+    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout}${lift.axis === "traced" ? `, along traced element, ${lift.slopeDeg.toFixed(1)}° slope, ${lift.curve}, ${lift.tracePoints} trace points` : ""})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
       `Point\tX (m)\tY (m)\tZ (m)\tLoad (kg)${sl ? "\tSling (m)\tAngle from horizontal (°)\tTension (kg)" : ""}`,
       ...lift.points.map((p, i) => [p.label, p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3), lift.shares.kg[i].toFixed(1),
         ...(sl ? [sl.legs[i].length.toFixed(2), sl.legs[i].angleFromHorizontal.toFixed(0), sl.legs[i].tensionKg.toFixed(1)] : [])].join("\t")));
@@ -479,6 +508,7 @@ $("density").onchange = recalc;
 $("units").onchange = recalc;
 for (const id of ["nPoints", "layout", "hookHeight", "labels"]) $(id).onchange = recalc;
 $("btnTrace").onclick = () => startTrace().catch((e) => cancelTrace(esc(String(e)), "err-text small"));
+$("btnTrace").textContent = TRACE_LABEL;
 $("btnTraceMeasured").onclick = () => traceFromMeasurements().catch((e) => traceStatus(esc(String(e)), "err-text small"));
 $("btnTraceClear").onclick = clearTrace;
 
