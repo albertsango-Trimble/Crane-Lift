@@ -154,4 +154,38 @@ plan = C.planOnAxis({ cog: sCog, a: A, b: B, boxes: [slopedBox], n: 4, layout: "
 for (const p of plan.points) assert.ok(near(p.z, zOnLine(p), 1e-6));
 assert.ok(C.loadShares(plan.points, sCog, 24900).kg.every((v) => near(v, 6225, 1e-6)));
 
+// ================= Vertical curve (crest), like the 649 kg curved beam =================
+// Runs along Y at x = 18; top surface is a parabola, highest near the start.
+const crestZ = (y) => 10.84 - 0.02 * (y - 5) ** 2;
+const crestBox = box([17.9, 2.7, 7.72], [18.1, 16.7, 10.84]);
+const top = (y) => ({ x: 18, y, z: crestZ(y) });
+const cCog = { x: 18, y: 9.708, z: 9.37 };
+
+// Two end clicks → straight chord, which runs BELOW the crest (the reported problem)
+plan = C.planOnAxis({ cog: cCog, pts: [top(3), top(16.4)], boxes: [crestBox], n: 4, layout: "line" });
+assert.strictEqual(plan.curve, "straight");
+assert.ok(plan.points.some((p) => crestZ(p.y) - p.z > 0.3), "chord should sag below the crest");
+
+// Three clicks (ends + middle) → parabola, every point sits on the top surface
+plan = C.planOnAxis({ cog: cCog, pts: [top(3), top(9.5), top(16.4)], boxes: [crestBox], n: 4, layout: "line" });
+assert.strictEqual(plan.curve, "curved");
+for (const p of plan.points) assert.ok(near(p.z, crestZ(p.y), 1e-6), `${p.label} z ${p.z} vs top ${crestZ(p.y)}`);
+assert.ok(plan.rise > 0.3, `crest rises above its chord: ${plan.rise}`);
+sh = C.loadShares(plan.points, cCog, 649);
+assert.ok(sh.stable && sh.kg.every((v) => near(v, 162.25, 1e-6)), sh.kg);
+// Click order doesn't matter
+const shuffled = C.planOnAxis({ cog: cCog, pts: [top(9.5), top(16.4), top(3)], boxes: [crestBox], n: 4, layout: "line" });
+assert.strictEqual(key(shuffled), key(plan));
+
+// Collinear clicks on a straight sloped member → still "straight"
+assert.strictEqual(C.planOnAxis({ cog: sCog, pts: [A, { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2, z: (A.z + B.z) / 2 }, B], boxes: [slopedBox], n: 2 }).curve, "straight");
+
+// Non-parabolic profile (flat then sloping) with a click at the kink → piecewise through the clicks
+const kinkZ = (y) => (y < 8 ? 10 : 10 - 0.3 * (y - 8));
+const kinkBox = box([17.9, 2.7, 7.3], [18.1, 16.7, 10]);
+const kp = [3, 5.5, 8, 12, 16.4].map((y) => ({ x: 18, y, z: kinkZ(y) }));
+plan = C.planOnAxis({ cog: { x: 18, y: 9.7, z: 9 }, pts: kp, boxes: [kinkBox], n: 4, layout: "line" });
+assert.strictEqual(plan.curve, "curved");
+for (const p of plan.points) assert.ok(Math.abs(p.z - kinkZ(p.y)) < 0.02, `${p.label} z ${p.z} vs ${kinkZ(p.y)}`);
+
 console.log("All lifting-point tests passed");
