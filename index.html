@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Lift COG</title>
-  <link rel="stylesheet" href="style.css?v=1.4.0" />
+  <link rel="stylesheet" href="style.css?v=1.5.0" />
   <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
 </head>
 <body>
@@ -48,10 +48,10 @@
       </label>
     </div>
     <div class="trace">
-      <div class="hint"><strong>Sloped or diagonal element?</strong> Trace it so points sit on its real top surface.</div>
+      <div class="hint"><strong>Sloped, diagonal or curved element?</strong> Trace it so points sit on its real top surface: click near each end, and for curved elements also click points in between.</div>
       <div class="row">
-        <button id="btnTrace" class="secondary">Trace element (2 clicks)</button>
-        <button id="btnTraceMeasured" class="secondary">Use 2 measured points</button>
+        <button id="btnTrace" class="secondary">Trace element</button>
+        <button id="btnTraceMeasured" class="secondary">Use measured points</button>
         <button id="btnTraceClear" class="link">Clear trace</button>
       </div>
       <div id="traceStatus" class="hint"></div>
@@ -92,7 +92,7 @@
     <pre id="log"></pre>
   </section>
 
-  <script src="cog.js?v=1.4.0"></script>
-  <script src="app.js?v=1.4.0"></script>
+  <script src="cog.js?v=1.5.0"></script>
+  <script src="app.js?v=1.5.0"></script>
 </body>
 </html>
