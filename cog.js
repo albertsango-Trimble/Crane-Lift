@@ -170,55 +170,134 @@
   }
 
   /**
-   * Lifting points along a traced member line. a, b = two points the user clicked on the TOP of
-   * the element (metres). The line gives direction and top-surface height; it is moved sideways in
-   * plan so it passes over the COG, so points stay symmetric about the COG and loads stay equal.
+   * Fits the top-surface profile of a member from points the user clicked on its TOP (metres).
+   * Plan: a straight line (best fit). Height: straight for 2 points; a parabola for 3+ points
+   * (vertical curves are parabolic), or piecewise-linear through the clicks if a parabola doesn't fit.
+   * Returns { o, h, nrm, zAt(s), sMin, sMax, kind } where s = plan distance along h from o.
    */
-  function planOnAxis({ cog, a, b, boxes, n, layout = "auto" }) {
+  function fitProfile(pts) {
+    const n = pts.length;
+    const mx = pts.reduce((a, p) => a + p.x, 0) / n, my = pts.reduce((a, p) => a + p.y, 0) / n;
+    let h;
+    if (n === 2) {
+      const dx = pts[1].x - pts[0].x, dy = pts[1].y - pts[0].y, l = Math.hypot(dx, dy);
+      h = l > 1e-9 ? { x: dx / l, y: dy / l } : { x: 1, y: 0 };
+    } else {
+      let sxx = 0, syy = 0, sxy = 0;
+      for (const p of pts) { const a = p.x - mx, b = p.y - my; sxx += a * a; syy += b * b; sxy += a * b; }
+      const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      h = { x: Math.cos(ang), y: Math.sin(ang) };
+    }
+    const o = { x: mx, y: my };
+    const S = pts.map((p) => ({ s: (p.x - o.x) * h.x + (p.y - o.y) * h.y, z: p.z })).sort((a, b) => a.s - b.s);
+    const sMin = S[0].s, sMax = S[n - 1].s;
+    const zSpread = Math.max(...S.map((q) => q.z)) - Math.min(...S.map((q) => q.z));
+    if (sMax - sMin < 0.2) return { error: "The traced points are too close together – click near each end of the element." };
+    if (sMax - sMin < 0.05 * zSpread) return { error: "The trace is vertical – trace along the length of the element, not up its side." };
+
+    let zAt, kind;
+    if (n === 2) {
+      const k = (S[1].z - S[0].z) / (S[1].s - S[0].s);
+      zAt = (s) => S[0].z + k * (s - S[0].s); kind = "straight";
+    } else {
+      // Least-squares parabola z = c0 + c1·u + c2·u² (u centred for conditioning).
+      const sm = (sMin + sMax) / 2;
+      const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], r = [0, 0, 0];
+      for (const q of S) {
+        const u = q.s - sm, row = [1, u, u * u];
+        for (let i = 0; i < 3; i++) { r[i] += row[i] * q.z; for (let j = 0; j < 3; j++) M[i][j] += row[i] * row[j]; }
+      }
+      const c = solve(M, r);
+      const quad = c && ((s) => c[0] + c[1] * (s - sm) + c[2] * (s - sm) ** 2);
+      const rms = quad ? Math.sqrt(S.reduce((a, q) => a + (quad(q.s) - q.z) ** 2, 0) / n) : Infinity;
+      if (quad && rms <= 0.03) {
+        zAt = quad;
+        // Call it straight if the curve never strays more than 2 cm from its chord.
+        const chord = (s) => quad(sMin) + ((quad(sMax) - quad(sMin)) * (s - sMin)) / (sMax - sMin);
+        kind = Math.abs(quad((sMin + sMax) / 2) - chord((sMin + sMax) / 2)) > 0.02 ? "curved" : "straight";
+      } else {
+        // Piecewise-linear through the clicks, extended along the end segments.
+        zAt = (s) => {
+          let i = 0;
+          while (i < n - 2 && s > S[i + 1].s) i++;
+          const A = S[i], B = S[i + 1];
+          return A.z + ((B.z - A.z) * (s - A.s)) / (B.s - A.s || 1);
+        };
+        kind = "curved";
+      }
+    }
+    return { o, h, nrm: { x: -h.y, y: h.x }, zAt, sMin, sMax, kind };
+  }
+
+  // Range of s where the plan line o + s·h crosses the plan box (2D slab method), or null.
+  function clipPlan(o, h, box) {
+    let t0 = -Infinity, t1 = Infinity;
+    for (const k of ["x", "y"]) {
+      if (Math.abs(h[k]) < 1e-12) { if (o[k] < box.min[k] || o[k] > box.max[k]) return null; continue; }
+      let ta = (box.min[k] - o[k]) / h[k], tb = (box.max[k] - o[k]) / h[k];
+      if (ta > tb) [ta, tb] = [tb, ta];
+      t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+    }
+    return t1 >= t0 ? [t0, t1] : null;
+  }
+
+  /**
+   * Lifting points along a traced member. pts (or a, b) = points clicked on the TOP of the element.
+   * The fitted profile gives the member's direction and the height of its top surface, including
+   * vertical curves. The plan line is moved sideways to pass over the COG, so points stay
+   * symmetric about the COG and loads stay equal.
+   */
+  function planOnAxis({ cog, pts, a, b, boxes, n, layout = "auto" }) {
+    pts = (pts || [a, b]).filter(Boolean);
     const bs = boxes.filter(Boolean), ub = unionBox(bs);
-    if (!ub || !cog || !a || !b || !(n >= 1)) return null;
-    let d = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
-    const L3 = Math.hypot(d.x, d.y, d.z);
-    const planLen = Math.hypot(d.x, d.y);
-    if (L3 < 0.2) return { error: "The two traced points are too close together – click near each end of the element." };
-    if (planLen < 0.05 * L3) return { error: "The traced line is vertical – trace along the length of the element, not up its side." };
-    d = { x: d.x / L3, y: d.y / L3, z: d.z / L3 };
-    const h = { x: d.x * L3 / planLen, y: d.y * L3 / planLen }; // plan direction (unit)
-    const nrm = { x: -h.y, y: h.x };                             // plan normal (unit)
-    const dxy = planLen / L3;                                     // plan metres per metre along member
+    if (!ub || !cog || pts.length < 2 || !(n >= 1)) return null;
+    const prof = fitProfile(pts);
+    if (prof.error) return prof;
+    const { h, nrm, zAt, sMin, sMax, kind } = prof;
 
-    // Shift the line sideways so it passes over the COG in plan.
-    const e = (cog.x - a.x) * nrm.x + (cog.y - a.y) * nrm.y;
-    const a2 = { x: a.x + e * nrm.x, y: a.y + e * nrm.y, z: a.z };
+    // Shift the plan line sideways so it passes over the COG (s is unchanged by the shift).
+    const e = (cog.x - prof.o.x) * nrm.x + (cog.y - prof.o.y) * nrm.y;
+    const o = { x: prof.o.x + e * nrm.x, y: prof.o.y + e * nrm.y };
 
-    // Member extent along the line: where it runs through the selection's box (with a little slack).
-    const slack = 0.05;
-    const span = clipLine(a2, d, { min: { x: ub.min.x - slack, y: ub.min.y - slack, z: ub.min.z - slack }, max: { x: ub.max.x + slack, y: ub.max.y + slack, z: ub.max.z + slack } })
-      || [Math.min(0, L3), Math.max(0, L3)];
-    const [t0, t1] = [Math.min(span[0], 0), Math.max(span[1], L3)]; // never shorter than what was clicked
-    const tc = ((cog.x - a2.x) * h.x + (cog.y - a2.y) * h.y) / dxy; // COG position along the member
+    // Member extent along the line: where it crosses the selection's plan box, never less than the clicks.
+    const span = clipPlan(o, h, { min: { x: ub.min.x - 0.05, y: ub.min.y - 0.05 }, max: { x: ub.max.x + 0.05, y: ub.max.y + 0.05 } });
+    const t0 = Math.min(span ? span[0] : sMin, sMin), t1 = Math.max(span ? span[1] : sMax, sMax);
+    const sc = (cog.x - o.x) * h.x + (cog.y - o.y) * h.y; // COG position along the member
     const L = t1 - t0, m = Math.max(0.05, 0.02 * L);
 
     // Width across the member, estimated from the plan box and the traced direction.
-    const Lx = ub.max.x - ub.min.x, Ly = ub.max.y - ub.min.y, Lp = L * dxy;
+    const Lx = ub.max.x - ub.min.x, Ly = ub.max.y - ub.min.y;
     const cx = Math.abs(h.x), cy = Math.abs(h.y);
-    const W = Math.max(0, cx >= cy ? (Ly - Lp * cy) / cx : (Lx - Lp * cx) / cy);
+    const W = Math.max(0, cx >= cy ? (Ly - L * cy) / cx : (Lx - L * cx) / cy);
     const roomV = Math.max(0, W / 2 - Math.max(0.05, 0.05 * W));
 
     const notes = [];
     let used = n === 1 ? "single" : n === 2 ? "line" : layout === "auto" ? (W >= 0.25 * L && roomV > 0.1 ? "area" : "line") : layout;
     if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Element is too narrow to spread points across its width – placed in a line instead."); }
 
-    const uv = makeUV(n, used, L, W, tc - t0 - m, t1 - tc - m, roomV);
+    const uv = makeUV(n, used, L, W, sc - t0 - m, t1 - sc - m, roomV);
     const points = uv.map(([du, dv], i) => {
-      const t = tc + du;
-      const p = { x: a2.x + t * d.x + dv * nrm.x, y: a2.y + t * d.y + dv * nrm.y, z: a2.z + t * d.z };
+      const s = sc + du;
+      const p = { x: o.x + s * h.x + dv * nrm.x, y: o.y + s * h.y + dv * nrm.y, z: zAt(s) };
       const onElement = bs.some((bx) => inPlan(p, bx, 0.05) && p.z >= bx.min.z - 0.05 && p.z <= bx.max.z + 0.05);
-      return { label: `P${i + 1}`, ...p, snapped: false, onElement };
+      const extrapolated = s < sMin - 0.05 || s > sMax + 0.05;
+      return { label: `P${i + 1}`, ...p, snapped: false, onElement, extrapolated };
     });
     if (points.some((p) => !p.onElement)) notes.push("Some points are outside the selected elements – check the trace was made along the top of the element.");
-    const slopeDeg = (Math.atan2(Math.abs(d.z), dxy) * 180) / Math.PI;
-    return { points, layout: used, axis: "traced", notes, slopeDeg, length: L, width: W };
+    const ext = points.filter((p) => p.extrapolated).map((p) => p.label);
+    if (ext.length && kind === "curved") notes.push(`${ext.join(", ")} ${ext.length > 1 ? "are" : "is"} beyond your outermost clicks, so ${ext.length > 1 ? "their heights are" : "its height is"} extrapolated – click closer to the ends for accuracy.`);
+
+    // Overall slope (end to end) and how far the curve rises/sags from its chord.
+    const z0 = zAt(t0), z1 = zAt(t1);
+    const slopeDeg = (Math.atan2(Math.abs(z1 - z0), L) * 180) / Math.PI;
+    let arc = 0, prev = null, rise = 0;
+    for (let k = 0; k <= 50; k++) {
+      const s = t0 + (L * k) / 50, z = zAt(s);
+      if (prev) arc += Math.hypot(s - prev.s, z - prev.z);
+      rise = Math.abs(z - (z0 + ((z1 - z0) * (s - t0)) / L)) > Math.abs(rise) ? z - (z0 + ((z1 - z0) * (s - t0)) / L) : rise;
+      prev = { s, z };
+    }
+    return { points, layout: used, axis: "traced", notes, slopeDeg, length: arc, width: W, curve: kind, rise, tracePoints: pts.length };
   }
 
   /**
@@ -338,7 +417,7 @@
     return { hook, legs };
   }
 
-  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, planOnAxis, looksSloped, loadShares, slings };
+  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, planOnAxis, fitProfile, looksSloped, loadShares, slings };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.COG = api;
 })(this);
