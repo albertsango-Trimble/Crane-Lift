@@ -275,8 +275,14 @@
     let used = n === 1 ? "single" : n === 2 ? "line" : layout === "auto" ? (W >= 0.25 * L && roomV > 0.1 ? "area" : "line") : layout;
     if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Element is too narrow to spread points across its width – placed in a line instead."); }
 
-    const uv = makeUV(n, used, L, W, sc - t0 - m, t1 - sc - m, roomV);
-    const points = uv.map(([du, dv], i) => {
+    const vClick = (prof.o.x - cog.x) * nrm.x + (prof.o.y - cog.y) * nrm.y; // where the trace was clicked, across the load
+    const mem = memberLayout({ bs, cog, h, nrm, n, L, sLo: t0 - sc + m, sHi: t1 - sc - m, zAt: (ds) => zAt(sc + ds), refV: vClick });
+    if (mem) {
+      used = "members"; notes.push(...mem.notes);
+      for (const p of mem.points) p.extrapolated = sc + p.s < sMin - 0.05 || sc + p.s > sMax + 0.05;
+    }
+    const uv = mem ? [] : makeUV(n, used, L, W, sc - t0 - m, t1 - sc - m, roomV);
+    const points = mem ? mem.points : uv.map(([du, dv], i) => {
       const s = sc + du;
       const p = { x: o.x + s * h.x + dv * nrm.x, y: o.y + s * h.y + dv * nrm.y, z: zAt(s) };
       const onElement = bs.some((bx) => inPlan(p, bx, 0.05) && p.z >= bx.min.z - 0.05 && p.z <= bx.max.z + 0.05);
@@ -301,6 +307,59 @@
   }
 
   /**
+   * Loads with an open centre (frames, pairs of rafters, ladders): when no member runs along the
+   * COG line, put the lifting points on the two outermost long members either side of it instead
+   * of in mid-air. Returns null when the centre line is covered by a member (normal layouts work).
+   * s and v are measured from the COG in plan along h (length) and nrm (across).
+   *   zAt(s): traced top height (traced loads) – shifted by each member's top relative to the
+   *           traced member (refV = where the trace was clicked). Without zAt the box top is used.
+   */
+  function memberLayout({ bs, cog, h, nrm, n, L, sLo, sHi, zAt, refV }) {
+    if (n < 2) return null;
+    const carriers = [];
+    for (const box of bs) {
+      const cs = [[box.min.x, box.min.y], [box.max.x, box.min.y], [box.min.x, box.max.y], [box.max.x, box.max.y]]
+        .map(([x, y]) => ({ s: (x - cog.x) * h.x + (y - cog.y) * h.y, v: (x - cog.x) * nrm.x + (y - cog.y) * nrm.y }));
+      const s0 = Math.min(...cs.map((c) => c.s)), s1 = Math.max(...cs.map((c) => c.s));
+      const v0 = Math.min(...cs.map((c) => c.v)), v1 = Math.max(...cs.map((c) => c.v));
+      const along = s1 - s0, lat = v1 - v0;
+      // A carrier runs (most of) the length of the load and is slender across it.
+      if (along >= 0.6 * L && lat <= Math.max(0.6, 0.15 * along)) carriers.push({ box, s0, s1, v: (v0 + v1) / 2, lat });
+    }
+    if (carriers.length < 2) return null;
+    if (carriers.some((c) => Math.abs(c.v) <= Math.max(0.15, c.lat / 2))) return null; // a member runs along the COG line
+    const A = carriers.reduce((a, c) => (c.v < a.v ? c : a)), B = carriers.reduce((a, c) => (c.v > a.v ? c : a));
+    if (!(A.v < 0 && B.v > 0)) return null; // all members on one side – nothing to straddle
+
+    const m = Math.max(0.05, 0.02 * L);
+    const lo = Math.max(sLo, A.s0 + m, B.s0 + m), hi = Math.min(sHi, A.s1 - m, B.s1 - m);
+    const room = Math.min(-lo, hi);
+    if (!(room > 0)) return null;
+
+    let place;
+    if (n === 2) place = [[0, A], [0, B]];
+    else if (n === 3) {
+      const nearC = Math.abs(A.v) <= Math.abs(B.v) ? A : B, farC = nearC === A ? B : A;
+      const p = rowOffsets(2, L, room)[1];
+      place = [[-p, nearC], [p, nearC], [0, farC]];
+    } else {
+      place = [];
+      for (const ds of rowOffsets(Math.ceil(n / 2), L, room)) place.push([ds, A], [ds, B]);
+    }
+    const ref = refV == null ? null : carriers.reduce((a, c) => (Math.abs(c.v - refV) < Math.abs(a.v - refV) ? c : a));
+    const points = place.map(([ds, c], i) => ({
+      label: `P${i + 1}`,
+      x: cog.x + ds * h.x + c.v * nrm.x,
+      y: cog.y + ds * h.y + c.v * nrm.y,
+      z: zAt ? zAt(ds) + (ref ? c.box.max.z - ref.box.max.z : 0) : c.box.max.z,
+      snapped: false, onElement: true, extrapolated: false, s: ds,
+    }));
+    const notes = [`The centre line of this load is open, so the points are on the two outer members either side of the centre of gravity (${(B.v - A.v).toFixed(2)} m apart).`];
+    if (n === 2) notes.push("With 2 points side by side the load can tip end-to-end about the line between them – use 4 points for better control.");
+    return { points, notes };
+  }
+
+  /**
    * Proposes N lifting points arranged symmetrically about the COG (equal loads on a rigid body),
    * then drops each one onto the top of the element underneath it.
    * opts: { cog, boxes: Box[], n, layout: "auto"|"line"|"area" }
@@ -322,6 +381,9 @@
     const notes = [];
     if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Selection is too narrow to spread points across its width – placed in a line instead."); }
 
+    const hU = U === "x" ? { x: 1, y: 0 } : { x: 0, y: 1 }, nV = U === "x" ? { x: 0, y: 1 } : { x: 1, y: 0 };
+    const mem = n >= 2 && memberLayout({ bs, cog, h: hU, nrm: nV, n, L: Lu, sLo: ub.min[U] - uc + mu, sHi: ub.max[U] - uc - mu });
+    if (mem) return { points: mem.points, layout: "members", axis: U, notes: mem.notes };
     const uv = makeUV(n, used, Lu, Lv, uc - ub.min[U] - mu, ub.max[U] - uc - mu, roomV);
 
     const points = uv.map(([du, dv], i) => {
