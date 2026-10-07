@@ -317,10 +317,24 @@
       used = "members"; notes.push(...mem.notes);
       for (const p of mem.points) p.extrapolated = sc + p.s < sMin - 0.05 || sc + p.s > sMax + 0.05;
     }
+    // The line is slid sideways onto the COG to absorb small click offsets (edge of a flange vs its
+    // centre). If the COG is well to the side of what was traced, sliding would carry the points off
+    // the element into empty space – stop and say so instead.
+    const maxShift = Math.max(0.5, Math.min(W / 2, 1.5));
+    const carriers = mem ? [] : findCarriers(bs, cog, h, nrm, L);
+    const centreC = carriers.filter(onCogLine).sort((a, b) => Math.abs(a.v) - Math.abs(b.v))[0];
+    let dzLine = 0; // height difference between the traced member and the one the points move onto
+    if (centreC && Math.abs(e) > 0.05) {
+      const ref = carriers.reduce((a, c) => (Math.abs(c.v - vClick) < Math.abs(a.v - vClick) ? c : a));
+      dzLine = centreC.box.max.z - ref.box.max.z;
+    }
+    if (!mem && Math.abs(e) > maxShift && !centreC) {
+      return { error: `The centre of gravity is ${Math.abs(e).toFixed(2)} m to the side of the line you traced, so points along it would be in empty space and couldn't balance the load. Use "Pick lifting points" to click where the slings attach on the element.`, offTrace: Math.abs(e) };
+    }
     const uv = mem ? [] : makeUV(n, used, L, W, sc - t0 - m, t1 - sc - m, roomV);
     const points = mem ? mem.points : uv.map(([du, dv], i) => {
       const s = sc + du;
-      const p = { x: o.x + s * h.x + dv * nrm.x, y: o.y + s * h.y + dv * nrm.y, z: zAt(s) };
+      const p = { x: o.x + s * h.x + dv * nrm.x, y: o.y + s * h.y + dv * nrm.y, z: zAt(s) + dzLine };
       const onElement = bs.some((bx) => inPlan(p, bx, 0.05) && p.z >= bx.min.z - 0.05 && p.z <= bx.max.z + 0.05);
       const extrapolated = s < sMin - 0.05 || s > sMax + 0.05;
       return { label: `P${i + 1}`, ...p, snapped: false, onElement, extrapolated };
@@ -350,8 +364,9 @@
    *   zAt(s): traced top height (traced loads) – shifted by each member's top relative to the
    *           traced member (refV = where the trace was clicked). Without zAt the box top is used.
    */
-  function memberLayout({ bs, cog, h, nrm, n, L, sLo, sHi, zAt, refV, layout = "auto" }) {
-    if (n < 2) return null;
+  // Long, slender members running along h (rafters, arches, beams), measured from the COG:
+  // s along the load, v across it. A carrier runs most of the load's length and is slender across it.
+  function findCarriers(bs, cog, h, nrm, L) {
     const carriers = [];
     for (const box of bs) {
       const cs = [[box.min.x, box.min.y], [box.max.x, box.min.y], [box.min.x, box.max.y], [box.max.x, box.max.y]]
@@ -359,13 +374,19 @@
       const s0 = Math.min(...cs.map((c) => c.s)), s1 = Math.max(...cs.map((c) => c.s));
       const v0 = Math.min(...cs.map((c) => c.v)), v1 = Math.max(...cs.map((c) => c.v));
       const along = s1 - s0, lat = v1 - v0;
-      // A carrier runs (most of) the length of the load and is slender across it.
       if (along >= 0.6 * L && lat <= Math.max(0.6, 0.15 * along)) carriers.push({ box, s0, s1, v: (v0 + v1) / 2, lat });
     }
+    return carriers;
+  }
+  const onCogLine = (c) => Math.abs(c.v) <= Math.max(0.15, c.lat / 2);
+
+  function memberLayout({ bs, cog, h, nrm, n, L, sLo, sHi, zAt, refV, layout = "auto" }) {
+    if (n < 2) return null;
+    const carriers = findCarriers(bs, cog, h, nrm, L);
     if (carriers.length < 2) return null;
     // A member along the COG line: a 2-point lift or an explicit "Along length" layout goes on that
     // member (the normal line layout). Wider lifts still use the outer members – a wider stance.
-    const centre = carriers.filter((c) => Math.abs(c.v) <= Math.max(0.15, c.lat / 2))
+    const centre = carriers.filter(onCogLine)
       .sort((a, b) => Math.abs(a.v) - Math.abs(b.v))[0];
     if (centre && (n === 2 || layout === "line")) return null;
     const A = carriers.reduce((a, c) => (c.v < a.v ? c : a)), B = carriers.reduce((a, c) => (c.v > a.v ? c : a));
@@ -407,7 +428,7 @@
       ? `Points are on ${rows.length} of the ${k} long members (${n / rows.length} on each), spread across the load from edge to edge, so none fall in the gaps between members.`
       : `Points are on the two outer long members either side of the centre of gravity (${(B.v - A.v).toFixed(2)} m apart), so none fall in the gaps between members.`];
     if (n === 2) notes.push("With 2 points side by side the load can tip end-to-end about the line between them – use 4 points for better control.");
-    return { points, notes, spread: B.v - A.v };
+    return { points, notes, spread: B.v - A.v, weight: rows.reduce((a, c) => a + (c.box.kg || 0), 0) };
   }
 
   /**
@@ -440,7 +461,11 @@
         [V, memberLayout({ bs, cog, h: nV, nrm: hU, n, L: Lv, sLo: ub.min[V] - vc + mv2, sHi: ub.max[V] - vc - mv2, layout })],
       ].filter(([, m]) => m);
       if (tries.length) {
-        const [ax, mem] = tries.reduce((a, b) => (b[1].spread > a[1].spread ? b : a));
+        // Prefer the members that carry the most weight (main rafters/beams, not light bracing),
+        // then the wider stance. Box "kg" is optional; without it only the stance is compared.
+        const better = (a, b) => (Math.abs(b[1].weight - a[1].weight) > 0.05 * Math.max(a[1].weight, b[1].weight, 1e-9)
+          ? b[1].weight > a[1].weight : b[1].spread > a[1].spread);
+        const [ax, mem] = tries.reduce((a, b) => (better(a, b) ? b : a));
         return { points: mem.points, layout: "members", axis: ax, notes: mem.notes };
       }
     }

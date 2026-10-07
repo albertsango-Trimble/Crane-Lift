@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "1.7.0";
+const VERSION = "2.0.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -50,6 +50,8 @@ function onEvent(event, args) {
     queueSelection(sel);
   } else if (event === "viewer.onPicked") {
     onPicked(args?.data ?? args);
+  } else if (event === "extension.accessToken") {
+    onAccessToken(args?.data ?? args);
   }
 }
 
@@ -87,13 +89,53 @@ function toMetres(pos) {
   return k ? { x: pos.x * k, y: pos.y * k, z: pos.z * k } : null;
 }
 
-const TRACE_LABEL = "Trace element";
-const pickTool = (text) => API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – trace element", text } });
+const TRACE_LABEL = "Trace element", PICK_LABEL = "Pick lifting points";
+const pickTool = (text, title = "Lift COG – trace element") => API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title, text } });
+
+// ---------- picking lifting points by hand ----------
+// For shapes a bounding box can't describe (bent, cranked, built-up pieces) the user clicks where each
+// sling attaches. Clicks snap to the model surface, so every point is on the element.
+const manual = new Map(); // selection key → [{ x, y, z }] in metres
+const activeManual = () => manual.get(selectionKey()) || null;
+function pickStatus(html, cls = "hint") { $("pickStatus").className = cls; $("pickStatus").innerHTML = html; }
+
+async function startPickLift() {
+  if (picking) return finishTrace();
+  if (!result?.box) return pickStatus("Select the element first.", "err-text small");
+  const key = selectionKey();
+  manual.set(key, []);
+  picking = { key, pts: [], mode: "lift" };
+  $("btnPickLift").textContent = "Finish picking";
+  pickStatus("<strong>Click the element where each sling attaches.</strong> Loads update after every click.", "warn-text");
+  recalc();
+  armTimeout();
+  try {
+    await pickTool("Click where each sling attaches", "Lift COG – pick lifting points");
+  } catch (e) {
+    cancelTrace();
+    pickStatus(`The viewer's picking tool isn't available (${esc(e.message || e)}).`, "err-text small");
+  }
+}
+
+function clearPicked() {
+  if (picking?.mode === "lift") cancelTrace();
+  manual.delete(selectionKey());
+  pickStatus("");
+  recalc();
+}
+
+function showPickStatus() {
+  const pts = activeManual();
+  if (!pts) return pickStatus("");
+  if (!pts.length) return pickStatus("No points picked – press <em>Pick lifting points</em> to start again.", "hint");
+  const ok = lift?.shares?.stable;
+  pickStatus(`${pts.length} point${pts.length > 1 ? "s" : ""} picked on the model. ${ok ? "The lift is stable – see the loads below." : "Not stable yet – see below."} <em>Clear picked points</em> returns to automatic placement.`, ok ? "ok-text" : "warn-text");
+}
 
 async function startTrace() {
   if (picking) return finishTrace();
   if (!result?.box) return traceStatus("Select the element first.", "err-text small");
-  picking = { key: selectionKey(), pts: [] };
+  picking = { key: selectionKey(), pts: [], mode: "trace" };
   $("btnTrace").textContent = "Finish trace";
   traceStatus("<strong>Click the top of the element near one end.</strong>", "warn-text");
   armTimeout();
@@ -106,13 +148,14 @@ async function startTrace() {
 
 function armTimeout() {
   clearTimeout(pickTimeout);
-  pickTimeout = setTimeout(() => picking && (picking.pts.length >= 2 ? finishTrace()
+  pickTimeout = setTimeout(() => picking && (picking.pts.length >= 2 || picking.mode === "lift" ? finishTrace()
     : cancelTrace("Trace timed out. If clicks aren't being picked up, use <em>Use measured points</em> instead.")), 120000);
 }
 
 // Stop listening for clicks. The trace made so far (2+ points) stays in use.
 function finishTrace() {
   const n = picking?.pts.length || 0;
+  if (picking?.mode === "lift") { cancelTrace(); return showPickStatus(); }
   cancelTrace();
   if (n < 2) return traceStatus("Trace cancelled – it needs at least 2 points.");
   showTraceStatus();
@@ -123,6 +166,7 @@ function cancelTrace(msg, cls = "hint") {
   picking = null;
   clearTimeout(pickTimeout);
   $("btnTrace").textContent = TRACE_LABEL;
+  $("btnPickLift").textContent = PICK_LABEL;
   API?.viewer.activateTool("reset").catch(() => {});
   if (msg) traceStatus(msg, cls);
   if (wasPicking) setTimeout(() => resyncSelection(), 300); // catch any selection change made while tracing
@@ -133,6 +177,18 @@ function onPicked(data) {
   const det = Array.isArray(data) ? data[0] : data;
   if (!det?.position) return;
   const p = toMetres(det.position);
+  if (picking.mode === "lift") {
+    if (!p) return pickStatus("That click wasn't on the selected element – click on it.", "err-text small");
+    picking.pts.push(p);
+    manual.set(picking.key, picking.pts.slice());
+    armTimeout();
+    log(`Lifting point ${picking.pts.length}: ${f(p.x)}, ${f(p.y)}, ${f(p.z)} m`);
+    recalc();
+    const ok = lift?.shares?.stable;
+    pickStatus(`<strong>${picking.pts.length} point${picking.pts.length > 1 ? "s" : ""} picked.</strong> ${picking.pts.length < 2 ? "Keep clicking." : ok ? "Stable – keep clicking to add more, or press <em>Finish picking</em>." : "Not stable yet – the centre of gravity must be inside the points. Keep clicking."}`, ok ? "ok-text" : "warn-text");
+    pickTool("Click where the next sling attaches, or press Finish picking", "Lift COG – pick lifting points").catch(() => {});
+    return;
+  }
   if (!p) return traceStatus("That click wasn't on the selected element – click its top surface.", "err-text small");
   picking.pts.push(p);
   armTimeout();
@@ -185,6 +241,263 @@ function clearTrace() {
   recalc();
 }
 
+// ---------- true geometry (IFC read in the browser) ----------
+// The viewer only exposes bounding boxes, so for the real shape the extension reads the model's
+// IFC itself: downloaded from Trimble Connect with the user's own access, or picked from their
+// computer. Nothing is uploaded anywhere – it stays in this browser tab.
+const WEBIFC_VERSION = "0.0.78";
+const WEBIFC_CDN = `https://cdn.jsdelivr.net/npm/web-ifc@${WEBIFC_VERSION}/`;
+const REGION_HOSTS = {
+  northAmerica: "https://app.connect.trimble.com", europe: "https://app21.connect.trimble.com",
+  unitedKingdom: "https://app22.connect.trimble.com", asiaPacific: "https://app31.connect.trimble.com",
+  australia: "https://app32.connect.trimble.com",
+};
+const REGION_ALIASES = { na: "northAmerica", us: "northAmerica", northamerica: "northAmerica", eu: "europe", europe: "europe",
+  uk: "unitedKingdom", gb: "unitedKingdom", unitedkingdom: "unitedKingdom", ap: "asiaPacific", asia: "asiaPacific",
+  asiapacific: "asiaPacific", au: "australia", aus: "australia", "ap-au": "australia", australia: "australia" };
+
+const geoModels = new Map(); // modelId → { state: "loading"|"ready"|"error", model, name, offset, message }
+let ifcApi = null, ifcApiPromise = null;
+let accessToken = null, tokenWaiters = [];
+let hmCache = { key: null, hm: null };
+
+function geoStatus(html, cls = "hint") { $("geoStatus").className = cls; $("geoStatus").innerHTML = html; }
+const geoReady = (modelId) => geoModels.get(modelId)?.state === "ready";
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.async = true; s.onload = resolve; s.onerror = () => reject(new Error(`Couldn't load ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+async function getIfcApi() {
+  if (ifcApi) return ifcApi;
+  if (!ifcApiPromise) ifcApiPromise = (async () => {
+    if (!window.WebIFC) await loadScript(`${WEBIFC_CDN}web-ifc-api-iife.js`);
+    const api = new window.WebIFC.IfcAPI();
+    await api.Init((path) => WEBIFC_CDN + path, true); // single-threaded: no special page headers needed
+    ifcApi = api;
+    return api;
+  })().catch((e) => { ifcApiPromise = null; throw e; });
+  return ifcApiPromise;
+}
+
+// Connect access token: the user is asked once; afterwards Connect hands it over directly.
+function onAccessToken(data) {
+  const t = typeof data === "string" ? data : data?.accessToken || data?.token;
+  if (t && t !== "pending" && t !== "denied") {
+    accessToken = t;
+    tokenWaiters.splice(0).forEach((w) => w.resolve(t));
+  } else if (t === "denied") tokenWaiters.splice(0).forEach((w) => w.reject(new Error("denied")));
+}
+async function getAccessToken() {
+  const r = await API.extension.requestPermission("accesstoken");
+  if (r && r !== "pending" && r !== "denied") return (accessToken = r);
+  if (r === "denied") throw new Error("denied");
+  if (accessToken) return accessToken;
+  geoStatus("Waiting for you to allow access in the Trimble Connect prompt…", "warn-text");
+  return new Promise((resolve, reject) => {
+    tokenWaiters.push({ resolve, reject });
+    setTimeout(() => reject(new Error("No answer to the access prompt.")), 120000);
+  });
+}
+
+async function regionHost() {
+  const p = await API.project.getProject().catch(() => null);
+  const loc = String(p?.location || "").trim();
+  if (/^https?:\/\//i.test(loc)) { try { return new URL(loc).origin; } catch (e) { /* fall through */ } }
+  const id = REGION_ALIASES[loc.toLowerCase().replace(/[\s_]/g, "")];
+  if (id) return REGION_HOSTS[id];
+  try { // the viewer page's own host usually is the project's region
+    const ref = new URL(document.referrer);
+    if (/connect\.trimble\.com$/.test(ref.hostname) && /^app\d*\./.test(ref.hostname)) return ref.origin;
+  } catch (e) { /* ignore */ }
+  return REGION_HOSTS.northAmerica;
+}
+
+async function downloadUrl(token, host, fileId, versionId) {
+  const q = versionId ? `?versionId=${encodeURIComponent(versionId)}` : "";
+  let last = null;
+  for (const v of ["2.1", "2.0"]) for (const path of [`/files/fs/${fileId}/downloadurl${q}`, `/files/${fileId}/downloadurl${q}`]) {
+    try {
+      const res = await fetch(`${host}/tc/api/${v}${path}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
+      if (!res.ok) { last = new Error(`Connect API ${res.status}`); continue; }
+      const data = await res.json();
+      const url = data?.url || data?.downloadUrl || data?.signedUrl;
+      if (url) return url;
+    } catch (e) { last = e; }
+  }
+  throw last || new Error("Trimble Connect didn't return a download link.");
+}
+
+async function fetchWithProgress(url, label) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed (${res.status}).`);
+  const total = Number(res.headers.get("content-length")) || 0;
+  if (!res.body?.getReader) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader(), chunks = [];
+  let got = 0, lastShown = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); got += value.length;
+    if (got - lastShown > 2e6) { lastShown = got; geoStatus(`Downloading ${esc(label)}: ${(got / 1e6).toFixed(0)}${total ? ` of ${(total / 1e6).toFixed(0)}` : ""} MB…`, "warn-text"); }
+  }
+  const out = new Uint8Array(got);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+async function openIfc(modelId, bytes, name) {
+  geoStatus(`Reading ${esc(name)} (${(bytes.length / 1e6).toFixed(1)} MB)…`, "warn-text");
+  await new Promise((r) => setTimeout(r, 30)); // let the status paint before the heavy parse
+  const api = await getIfcApi();
+  const t = performance.now();
+  const model = await GEO.GeoModel.open(window.WebIFC, api, bytes);
+  const prev = geoModels.get(modelId);
+  if (prev?.model && prev.model !== model) prev.model.close();
+  geoModels.set(modelId, { state: "ready", model, name, offset: null });
+  log(`Geometry: ${name} read in ${((performance.now() - t) / 1000).toFixed(1)} s`);
+}
+
+// Download the IFC behind each selected model from Trimble Connect.
+async function loadGeometryFromConnect() {
+  const ids = [...new Set(selection.map((m) => m.modelId))];
+  if (!ids.length) return geoStatus("Select the elements first, then load their geometry.", "err-text small");
+  const specs = await API.viewer.getModels("loaded").catch(() => []);
+  let token;
+  try { token = await getAccessToken(); } catch (e) {
+    return geoStatus(e.message === "denied"
+      ? "Access wasn't allowed, so the model can't be downloaded. You can reset this in the extension's settings, or use <em>Load IFC from computer</em>."
+      : `Couldn't get access to Trimble Connect (${esc(e.message)}). Use <em>Load IFC from computer</em> instead.`, "err-text small");
+  }
+  const host = await regionHost();
+  for (const modelId of ids) {
+    if (geoReady(modelId)) continue;
+    const spec = (Array.isArray(specs) ? specs : []).find((m) => m.id === modelId) || {};
+    const name = spec.name || modelId;
+    if (!/\.ifc(zip)?$/i.test(name) && !/ifc/i.test(spec.type || "")) {
+      geoModels.set(modelId, { state: "error", name, message: "not an IFC file" });
+      geoStatus(`${esc(name)} isn't an IFC file, so its geometry can't be read here. Export it to IFC, or use <em>Load IFC from computer</em>.`, "err-text small");
+      continue;
+    }
+    if (/\.ifczip$/i.test(name)) {
+      geoModels.set(modelId, { state: "error", name, message: "ifczip" });
+      geoStatus(`${esc(name)} is a zipped IFC, which isn't supported yet. Use <em>Load IFC from computer</em> with the unzipped file.`, "err-text small");
+      continue;
+    }
+    try {
+      geoModels.set(modelId, { state: "loading", name });
+      geoStatus(`Getting a download link for ${esc(name)}…`, "warn-text");
+      const url = await downloadUrl(token, host, modelId, spec.versionId);
+      const bytes = await fetchWithProgress(url, name);
+      await openIfc(modelId, bytes, name);
+    } catch (e) {
+      geoModels.set(modelId, { state: "error", name, message: String(e.message || e) });
+      log("Geometry download failed:", String(e.message || e));
+      geoStatus(`Couldn't download ${esc(name)} from Trimble Connect (${esc(e.message || e)}). Use <em>Load IFC from computer</em> instead – the file stays on your machine.`, "err-text small");
+      return;
+    }
+  }
+  await attachGeometry();
+}
+
+// Fallback: the user picks the IFC on their computer. It's matched to the selection by element GUIDs.
+async function loadGeometryFromFile(file) {
+  if (!file) return;
+  const ids = [...new Set(selection.map((m) => m.modelId))];
+  if (!ids.length) return geoStatus("Select the elements first, then load the IFC.", "err-text small");
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const api = await getIfcApi();
+    geoStatus(`Reading ${esc(file.name)} (${(bytes.length / 1e6).toFixed(1)} MB)…`, "warn-text");
+    await new Promise((r) => setTimeout(r, 30));
+    const model = await GEO.GeoModel.open(window.WebIFC, api, bytes);
+    // Which selected model does this file belong to? Check a few element GUIDs.
+    let matched = 0;
+    for (const sel of selection) {
+      const guids = await API.viewer.convertToObjectIds(sel.modelId, sel.objectRuntimeIds.slice(0, 5)).catch(() => []);
+      if (guids.some((g) => model.expressIdFor(g) != null)) {
+        const prev = geoModels.get(sel.modelId);
+        if (prev?.model && prev.model !== model) prev.model.close();
+        geoModels.set(sel.modelId, { state: "ready", model, name: file.name, offset: null });
+        matched++;
+      }
+    }
+    if (!matched) {
+      model.close();
+      return geoStatus(`${esc(file.name)} doesn't contain the selected elements. Pick the IFC that this model was made from.`, "err-text small");
+    }
+    await attachGeometry();
+  } catch (e) {
+    geoStatus(`Couldn't read ${esc(file.name)} (${esc(e.message || e)}).`, "err-text small");
+  } finally {
+    $("geoFile").value = "";
+  }
+}
+
+// Give every selected element its real mesh (where the model's IFC is loaded), then recalculate.
+async function attachGeometry() {
+  const seq = loadSeq;
+  let found = 0, missing = 0;
+  for (const modelId of [...new Set(rows.map((r) => r.modelId))]) {
+    const g = geoModels.get(modelId);
+    if (g?.state !== "ready") continue;
+    const mrows = rows.filter((r) => r.modelId === modelId && r.mesh === undefined);
+    if (!mrows.length) continue;
+    const guids = await API.viewer.convertToObjectIds(modelId, mrows.map((r) => r.id)).catch(() => []);
+    if (seq !== loadSeq) return;
+    mrows.forEach((r, i) => {
+      const ex = guids[i] != null ? g.model.expressIdFor(guids[i]) : null;
+      const mesh = ex != null ? g.model.mesh(ex) : null;
+      r.mesh = mesh || null;
+      r.geo = mesh ? GEO.meshStats(mesh) : null;
+      if (mesh) found++; else missing++;
+    });
+    alignModel(modelId, g);
+  }
+  hmCache = { key: null, hm: null };
+  updateGeoStatus(found, missing);
+  recalc();
+}
+
+// The viewer and the IFC normally share coordinates. If a model was moved in Connect, the meshes
+// are shifted to match (only for clear offsets – the viewer's boxes are a little loose by nature).
+function alignModel(modelId, g) {
+  if (g.offset) return;
+  const d = rows.filter((r) => r.modelId === modelId && r.geo && r.box).map((r) => ["x", "y", "z"].map((k) => r.box.min[k] - r.geo.min[k]));
+  if (!d.length) return;
+  const med = [0, 1, 2].map((k) => d.map((v) => v[k]).sort((a, b) => a - b)[Math.floor(d.length / 2)]);
+  g.offset = Math.hypot(...med) > 1 ? { x: med[0], y: med[1], z: med[2] } : { x: 0, y: 0, z: 0 };
+  if (g.offset.x || g.offset.y || g.offset.z) log(`Geometry offset for ${g.name}: ${med.map((v) => v.toFixed(2)).join(", ")} m`);
+}
+function shifted(r) {
+  const o = geoModels.get(r.modelId)?.offset;
+  if (!r.mesh || !o || (!o.x && !o.y && !o.z)) return r.mesh;
+  if (r._shifted) return r._shifted;
+  const pos = Float64Array.from(r.mesh.pos);
+  for (let i = 0; i < pos.length; i += 3) { pos[i] += o.x; pos[i + 1] += o.y; pos[i + 2] += o.z; }
+  return (r._shifted = { pos, idx: r.mesh.idx });
+}
+const shiftPoint = (r, p) => { const o = geoModels.get(r.modelId)?.offset; return p && o ? { x: p.x + o.x, y: p.y + o.y, z: p.z + o.z } : p; };
+
+function updateGeoStatus(found, missing) {
+  const ready = [...geoModels.values()].filter((g) => g.state === "ready");
+  if (!ready.length) return;
+  const withMesh = rows.filter((r) => r.mesh).length;
+  geoStatus(`Using true geometry from ${ready.map((g) => esc(g.name)).join(", ")} – ${withMesh} of ${rows.length} selected element${rows.length === 1 ? "" : "s"} matched.${missing ? ` ${missing} couldn't be found in the IFC and use their bounding box.` : ""}`, withMesh ? "ok-text" : "warn-text");
+}
+
+function geometryHeightmap() {
+  const meshed = rows.filter((r) => r.mesh);
+  const key = selectionKey() + "|" + meshed.length;
+  if (hmCache.key !== key) hmCache = { key, hm: meshed.length ? GEO.buildHeightmap(meshed.map(shifted)) : null };
+  return hmCache.hm;
+}
+
 // ---------- data loading ----------
 let loadSeq = 0; // only the most recent selection load is allowed to update the panel
 
@@ -217,6 +530,7 @@ async function loadSelection(sel) {
   selection = newSel;
   rows = newRows;
   recalc();
+  if (rows.some((r) => geoReady(r.modelId))) attachGeometry().catch((e) => log("Geometry:", String(e)));
 }
 
 // Recompute masses/centres from cached data (cheap: runs on every setting/override change)
@@ -230,8 +544,15 @@ function recalc() {
     r.override = overrides.has(key);
     r.kg = r.override ? overrides.get(key) : found.kg;
     r.massSource = r.override ? "Entered manually" : found.source;
-    const c = COG.findCentre(r.obj, r.box);
-    r.point = c.point; r.centreSource = c.source; r.approx = c.approximate;
+    if (!(r.kg > 0) && !r.override && r.geo?.volume > 0 && density() > 0) {
+      r.kg = r.geo.volume * density(); r.massSource = `True geometry volume × ${density()} kg/m³`;
+    }
+    if (r.geo?.centroid) {
+      r.point = shiftPoint(r, r.geo.centroid); r.centreSource = "True geometry (volume centroid)"; r.approx = false;
+    } else {
+      const c = COG.findCentre(r.obj, r.box);
+      r.point = c.point; r.centreSource = c.source; r.approx = c.approximate;
+    }
   }
   result = rows.length ? COG.combine(rows) : null;
   if (result) result.box = COG.unionBox(rows.map((r) => r.box));
@@ -246,13 +567,26 @@ let markerTimer = null;
 function planLift() {
   lift = null;
   if (!result?.cog) return;
-  const opts = { cog: result.cog, boxes: rows.map((r) => r.box), n: parseInt($("nPoints").value, 10), layout: $("layout").value };
-  const tr = activeTrace();
+  const opts = { cog: result.cog, boxes: rows.map((r) => (r.box ? { ...r.box, kg: r.kg } : null)), n: parseInt($("nPoints").value, 10), layout: $("layout").value };
+  const tr = activeTrace(), man = activeManual();
   if (!tr && !picking) traceStatus(""); // any trace message belonged to a different selection
+  if (!man && !picking) pickStatus("");
   let plan;
-  if (tr) {
-    plan = COG.planOnAxis({ ...opts, pts: tr.pts });
+  if (man) {
+    // Points the user clicked on the model – used exactly as picked.
+    if (!man.length) { lift = { awaitingPicks: true }; return; }
+    plan = { points: man.map((p, i) => ({ label: `P${i + 1}`, ...p })), layout: "picked", axis: "picked", notes: [] };
+  } else if (rows.some((r) => r.mesh)) {
+    // True geometry: real top surfaces, no tracing needed.
+    const hm = geometryHeightmap();
+    const elems = rows.filter((r) => r.mesh).map((r) => ({ mesh: shifted(r), kg: r.kg }));
+    plan = GEO.planWithGeometry({ C: COG, cog: result.cog, elems, hm, n: opts.n, layout: opts.layout, totalKg: result.totalKg });
     if (plan?.error) { lift = { error: plan.error }; return; }
+    const without = rows.filter((r) => !r.mesh).length;
+    if (plan && without) plan.notes.push(`${without} element${without > 1 ? "s" : ""} weren't found in the IFC, so ${without > 1 ? "they aren't" : "it isn't"} used for placing points.`);
+  } else if (tr) {
+    plan = COG.planOnAxis({ ...opts, pts: tr.pts });
+    if (plan?.error) { lift = { error: plan.error, offTrace: plan.offTrace }; return; }
   } else {
     // A bounding box is only a good stand-in for the top surface of flat, axis-aligned loads.
     // Checked per element, ignoring columns and small parts (see COG.needsTrace).
@@ -306,7 +640,9 @@ let liftIcons = [];
 async function drawLift() {
   await clearLift();
   if (!lift || !lift.points) {
-    liftStatus(lift?.needsTrace ? "Not drawn – trace the element first (see below)." : lift?.error ? esc(lift.error) : "", lift ? "warn-text" : "muted");
+    liftStatus(lift?.needsTrace ? "Not drawn – trace the element first (see below)."
+      : lift?.awaitingPicks ? "Click the element where each sling attaches."
+      : lift?.error ? "Not drawn – see below." : "", lift ? "warn-text" : "muted");
     return;
   }
   const ids = [], problems = [];
@@ -361,6 +697,9 @@ async function clearLift() {
 
 // ---------- rendering ----------
 function render() {
+  // With true geometry the real top surface is known, so tracing isn't needed.
+  const usingGeo = rows.some((r) => r.mesh);
+  $("traceBox").hidden = usingGeo && !activeTrace();
   renderResult();
   renderLift();
   renderElements();
@@ -373,6 +712,10 @@ function renderLift() {
   }
   if (lift.error) {
     $("liftResult").innerHTML = `<p class="err-text">${esc(lift.error)}</p>`;
+    return;
+  }
+  if (lift.awaitingPicks) {
+    $("liftResult").innerHTML = '<p class="warn-text">Click the element in the 3D view where each sling attaches. Each click adds a point and the loads are worked out straight away.</p>';
     return;
   }
   if (lift.needsTrace) {
@@ -397,7 +740,9 @@ function renderLift() {
     const spread = Math.max(...shares.kg) - Math.min(...shares.kg);
     msgs.push(spread <= 0.01 * W
       ? '<p class="ok-text">Balanced: every point carries an equal share and the hook sits directly above the COG.</p>'
-      : '<p class="warn-text">Loads are unequal because some points had to move onto an element – check the shares above.</p>');
+      : lift.layout === "picked"
+        ? '<p class="warn-text">Loads are unequal because the points aren\'t symmetric about the centre of gravity. Move points to even them out, or rig for the shares shown.</p>'
+        : '<p class="warn-text">Loads are unequal because some points had to move onto an element – check the shares above.</p>');
   }
   if (!shares.determinate) {
     msgs.push(`<p class="warn-text">With ${points.length} points the shares assume the load is shared evenly, e.g. through a spreader beam or equalising rigging. With fixed-length slings a rigid load may hang on fewer points – many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.</p>`);
@@ -408,7 +753,7 @@ function renderLift() {
   for (const n of notes) msgs.push(`<p class="warn-text">${esc(n)}</p>`);
 
   $("liftResult").innerHTML = `
-    <div class="hint">${lift.axis === "traced"
+    <div class="hint">${lift.axis === "geometry" ? `Placed on the real top surface of the steel, from the model's IFC (true geometry). Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread over the load" : layout === "line" ? "in a line along the load" : "single point over the COG"}.` : lift.layout === "picked" ? `${lift.points.length} point${lift.points.length > 1 ? "s" : ""} you picked on the model (on its surface). Hook directly above the centre of gravity.` : lift.axis === "traced"
       ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope${lift.curve === "curved" ? `, curved: top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : ""}, traced from ${lift.tracePoints} points). Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
       : `Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.`}</div>
     <table class="lift">${head}${body}</table>
@@ -547,6 +892,10 @@ $("btnTrace").onclick = () => startTrace().catch((e) => cancelTrace(esc(String(e
 $("btnTrace").textContent = TRACE_LABEL;
 $("btnTraceMeasured").onclick = () => traceFromMeasurements().catch((e) => traceStatus(esc(String(e)), "err-text small"));
 $("btnTraceClear").onclick = clearTrace;
+$("btnPickLift").onclick = () => startPickLift().catch((e) => { cancelTrace(); pickStatus(esc(String(e)), "err-text small"); });
+$("btnPickClear").onclick = clearPicked;
+$("btnGeo").onclick = () => loadGeometryFromConnect().catch((e) => geoStatus(esc(String(e.message || e)), "err-text small"));
+$("geoFile").onchange = (e) => loadGeometryFromFile(e.target.files?.[0]);
 $("btnRefresh").onclick = async () => {
   if (picking) finishTrace();
   const sel = await API?.viewer.getSelection().catch(() => null);

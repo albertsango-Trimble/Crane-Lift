@@ -4,6 +4,20 @@ Works out the **combined centre of gravity (COG)** of the elements selected in t
 
 > **Estimate only.** Results depend on the weights and geometry in the model. Confirm against the lift plan and a competent person before lifting.
 
+## True geometry (recommended)
+Trimble Connect only gives extensions each element's **bounding box**. That's fine for flat, square-on steel, but not for sloped, curved, cranked or open-frame loads. **Load true geometry** reads the model's own IFC, so the extension uses the **real shape**:
+- **True centre of gravity:** the volume centroid of each element's actual solid, weighted by its weight.
+- **Lifting points on real steel:** points are laid out with the rules below, then placed on the actual top surface. Any point over a gap is moved onto the nearest steel. If moving them breaks the balance, the pattern is drawn in until the load is balanced and stable.
+- **No tracing needed:** slopes, curves, arches and bent pieces are handled automatically, and the trace box is hidden.
+
+How it gets the IFC:
+1. **Load true geometry** asks once for permission to use your Trimble Connect sign-in (Connect shows a prompt). It then downloads the IFC behind the selected model straight from your project, from the project's own region.
+2. **Load IFC from computer** is the alternative: choose the IFC file and it is matched to the selection by element GUIDs. Use this if the download is blocked, or for a model you can't upload.
+
+**Privacy:** the IFC is read **in your browser only** (with the open-source [web-ifc](https://github.com/ThatOpen/engine_web-ifc) library). It is not uploaded anywhere. Only the library code is fetched from jsDelivr.
+
+Limits: the model in Connect must be an **IFC** (not `.ifczip` or a native Tekla/Revit file). Very large models take a while to read the first time; after that they stay loaded for the session. If a model was moved in Connect, a clear offset (over 1 m) between the IFC and the viewer is detected and corrected.
+
 ## How to use
 1. Open the model in the 3D Viewer and open the **Lift COG** panel.
 2. Select every element that will be lifted together (Ctrl/Shift-click, or select an assembly).
@@ -11,6 +25,7 @@ Works out the **combined centre of gravity (COG)** of the elements selected in t
 4. **Show marker** places a pink **single point measurement** at the COG in the 3D view (the same markup as Measure → Single point, so it shows the coordinates and appears in the measurement list). **Clear marker** removes only that point, not your other measurements.
 5. **Lifting points:** choose 1, 2, 3, 4, 6 or 8 points and a layout, and blue single-point markups appear on top of the elements, labelled with the load each one carries. They update automatically when you change the selection or settings. **Hide lifting points** removes them.
    - **Sloped, diagonal or curved elements** (rafters, raking beams, braces, cambered or vertically curved beams): the panel asks you to **trace** the element instead of drawing points in mid-air. Click **Trace element**, then click the top of the element near each end. The points update after the second click. **For a curved element, keep clicking points along the top** (at least one near the middle), then press **Finish trace**. If clicks aren't picked up, place **Measure → Single point** measurements along the top of the element and press **Use measured points**.
+   - **Complex shapes** (bent, cranked or built-up pieces) **or loads with designed lifting lugs:** click **Pick lifting points**, then click the element wherever a sling attaches. Each click snaps to the model surface, so every point is on the element, and the loads and stability update after each click. Press **Finish picking** when done. **Clear picked points** goes back to automatic placement. Picked points are remembered for each selection.
 6. **Copy result** copies a summary, the per-element table and the lifting points (paste into Excel or the lift plan).
 
 ## How it calculates
@@ -48,6 +63,8 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - If you select an assembly *and* its parts, it can be counted twice. Select one or the other and check the element list.
 - Untraced layouts follow the X or Y axis of the model. If a load is rotated in plan but not flagged, use **Trace element** anyway – it works for any straight member.
 - Trace along the **top** of the element. Points are placed at the height of the profile you trace.
+- Small offsets between your trace and the centre of gravity (for example, clicking a flange edge) are corrected automatically. If the centre of gravity is well to the side of the traced line and no member runs under it, the panel does not draw points in empty space. It asks you to use **Pick lifting points** instead.
+- The extension only sees each element's bounding box and the points you click, not its true shape. For anything a box describes poorly, **Pick lifting points** is the reliable option.
 - For curved elements, click near both ends and at least once in the middle. Points beyond your outermost clicks have their height extrapolated, and the panel says so.
 - The trace is straight in plan. Elements curved in plan (horizontal curves) aren't supported yet.
 - For a curved element without a COG property, the COG is the centre of its bounding box. That is close for symmetric curves but not exact.
@@ -60,8 +77,10 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 | `index.html`, `style.css` | Panel UI |
 | `app.js` | Viewer wiring (selection, properties, bounding boxes, markups) |
 | `cog.js` | Pure COG and lifting-point maths, no viewer dependency |
+| `geo.js` | True geometry: IFC meshes (via web-ifc), volume centroids, top-surface height map, placing points on real steel |
 | `test-cog.js` | `node test-cog.js` – unit tests for the COG and lifting-point maths |
 | `test-frame.js`, `test-frame.json` | `node test-frame.js` – tests against real geometry: the curved-rafter frame and portal frame from `ARV_Sample_1.ifc`, and the arched canopy from `Korec_Tekla.ifc` (plus 2–8 arch copies) |
+| `test-geo.mjs`, `test-geo-*.json` | `npm i web-ifc && node test-geo.mjs ARV_Sample_1.ifc Korec_Tekla.ifc test-geo-arv.json test-geo-korec.json` – checks geometry against IfcOpenShell reference values |
 | `lift.svg`, `icon.svg` | Fallback lifting-point icon, panel icon |
 
 ## Deploy

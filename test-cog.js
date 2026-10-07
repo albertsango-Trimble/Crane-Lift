@@ -188,4 +188,19 @@ plan = C.planOnAxis({ cog: { x: 18, y: 9.7, z: 9 }, pts: kp, boxes: [kinkBox], n
 assert.strictEqual(plan.curve, "curved");
 for (const p of plan.points) assert.ok(Math.abs(p.z - kinkZ(p.y)) < 0.02, `${p.label} z ${p.z} vs ${kinkZ(p.y)}`);
 
+// ================= Complex shape: COG well to the side of what was traced =================
+// Like the 534 t bent piece: trace runs along one part near the top, COG is ~3 m to the side,
+// no member under the COG. Points must NOT be slid into empty space.
+{
+  const big = box([330765.4, 5816896.9, 0.0], [330773.0, 5816913.3, 25.56]);
+  const cogBig = { x: 330769.03, y: 5816905.17, z: 17.05 };
+  const tr = [{ x: 330766.2, y: 5816900.2, z: 25.0 }, { x: 330767.0, y: 5816905.0, z: 25.15 }, { x: 330767.7, y: 5816909.5, z: 25.3 }];
+  const pl = C.planOnAxis({ cog: cogBig, pts: tr, boxes: [big], n: 4 });
+  assert.ok(pl.error && pl.offTrace > 1.5, JSON.stringify(pl).slice(0, 200));
+  assert.ok(/Pick lifting points/.test(pl.error));
+  // A small slip (clicking the flange edge, 0.1 m off) is still absorbed
+  const ok = C.planOnAxis({ cog: { ...cogBig, x: 330767.0 + 0.1 }, pts: tr, boxes: [big], n: 4, layout: "line" });
+  assert.ok(!ok.error, ok.error);
+}
+
 console.log("All lifting-point tests passed");
