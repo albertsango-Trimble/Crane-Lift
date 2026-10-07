@@ -157,6 +157,28 @@
     };
   }
 
+  /**
+   * Whether a selection needs tracing. Checks each element on its own (a box around the whole
+   * selection is tall just because it contains columns) and ignores:
+   *  - vertical elements (columns, posts, hangers) – they are lifted by what sits on top of them;
+   *  - minor parts under 5% of the total weight (cleats, stays, bolts).
+   * items: [{ box, kg }]
+   */
+  function needsTrace(items) {
+    const withBox = items.filter((it) => it.box);
+    const total = withBox.reduce((a, it) => a + (it.kg > 0 ? it.kg : 0), 0);
+    const out = { sloped: false, skewed: false, vertical: 0 };
+    for (const it of withBox) {
+      const b = it.box, Lx = b.max.x - b.min.x, Ly = b.max.y - b.min.y, Lz = b.max.z - b.min.z;
+      if (Lz > 1 && Math.max(Lx, Ly) < 0.5 * Lz) { out.vertical++; continue; }
+      if (total > 0 && !(it.kg >= 0.05 * total)) continue;
+      const f = looksSloped(b);
+      out.sloped = out.sloped || f.sloped;
+      out.skewed = out.skewed || f.skewed;
+    }
+    return out;
+  }
+
   // Parameter range [t0, t1] where the line a + t·d lies inside box (slab method), or null.
   function clipLine(a, d, box) {
     let t0 = -Infinity, t1 = Infinity;
@@ -356,7 +378,7 @@
     }));
     const notes = [`The centre line of this load is open, so the points are on the two outer members either side of the centre of gravity (${(B.v - A.v).toFixed(2)} m apart).`];
     if (n === 2) notes.push("With 2 points side by side the load can tip end-to-end about the line between them – use 4 points for better control.");
-    return { points, notes };
+    return { points, notes, spread: B.v - A.v };
   }
 
   /**
@@ -382,8 +404,17 @@
     if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Selection is too narrow to spread points across its width – placed in a line instead."); }
 
     const hU = U === "x" ? { x: 1, y: 0 } : { x: 0, y: 1 }, nV = U === "x" ? { x: 0, y: 1 } : { x: 1, y: 0 };
-    const mem = n >= 2 && memberLayout({ bs, cog, h: hU, nrm: nV, n, L: Lu, sLo: ub.min[U] - uc + mu, sHi: ub.max[U] - uc - mu });
-    if (mem) return { points: mem.points, layout: "members", axis: U, notes: mem.notes };
+    if (n >= 2) {
+      const mv2 = Math.max(0.05, 0.02 * Lv);
+      const tries = [
+        [U, memberLayout({ bs, cog, h: hU, nrm: nV, n, L: Lu, sLo: ub.min[U] - uc + mu, sHi: ub.max[U] - uc - mu })],
+        [V, memberLayout({ bs, cog, h: nV, nrm: hU, n, L: Lv, sLo: ub.min[V] - vc + mv2, sHi: ub.max[V] - vc - mv2 })],
+      ].filter(([, m]) => m);
+      if (tries.length) {
+        const [ax, mem] = tries.reduce((a, b) => (b[1].spread > a[1].spread ? b : a));
+        return { points: mem.points, layout: "members", axis: ax, notes: mem.notes };
+      }
+    }
     const uv = makeUV(n, used, Lu, Lv, uc - ub.min[U] - mu, ub.max[U] - uc - mu, roomV);
 
     const points = uv.map(([du, dv], i) => {
@@ -479,7 +510,7 @@
     return { hook, legs };
   }
 
-  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, planOnAxis, fitProfile, looksSloped, loadShares, slings };
+  const api = { PT, findMass, findCogProperty, findCentre, combine, scaleBox, boxCentre, unionBox, planLiftPoints, planOnAxis, fitProfile, looksSloped, needsTrace, loadShares, slings };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.COG = api;
 })(this);
