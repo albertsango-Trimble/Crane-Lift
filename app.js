@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "2.2.0";
+const VERSION = "2.3.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -274,8 +274,8 @@ async function fetchWithProgress(url, label) {
   return out;
 }
 
-async function openIfc(modelId, bytes, name) {
-  geoStatus(`Reading ${esc(name)} (${(bytes.length / 1e6).toFixed(1)} MB)…`, "warn-text");
+async function openIfc(modelId, bytes, name, label = name) {
+  geoStatus(`Reading ${esc(label)} (${(bytes.length / 1e6).toFixed(1)} MB)…`, "warn-text");
   await new Promise((r) => setTimeout(r, 30)); // let the status paint before the heavy parse
   const api = await getIfcApi();
   const t = performance.now();
@@ -287,49 +287,61 @@ async function openIfc(modelId, bytes, name) {
 }
 
 // Download the IFC behind each selected model from Trimble Connect.
+// Download the IFC behind every model that has elements in the selection, one after another.
+// A model that fails doesn't stop the others; pressing the button again retries the failed ones.
+let geoEnabled = false;      // set once the user has asked for true geometry this session
+let geoBusy = null, geoAgain = false;
 async function loadGeometryFromConnect() {
+  if (geoBusy) { geoAgain = true; return geoBusy; } // already loading – run once more afterwards
+  geoBusy = (async () => {
+    do { geoAgain = false; await loadSelectedModels(); } while (geoAgain);
+  })().finally(() => { geoBusy = null; });
+  return geoBusy;
+}
+
+async function loadSelectedModels() {
   const ids = [...new Set(selection.map((m) => m.modelId))];
   if (!ids.length) return geoStatus("Select the elements first, then load their geometry.", "err-text small");
-  const specs = await API.viewer.getModels("loaded").catch(() => []);
+  const todo = ids.filter((id) => !geoReady(id) && geoModels.get(id)?.message !== "not an IFC file");
+  if (!todo.length) { await attachGeometry({ force: true }); return; }
+
   let token;
   try { token = await getAccessToken(); } catch (e) {
     return geoStatus(e.message === "denied"
-      ? "Access wasn't allowed, so the model can't be downloaded. You can reset this in the extension's settings and try again."
+      ? "Access wasn't allowed, so the models can't be downloaded. You can reset this in the extension's settings and try again."
       : `Couldn't get access to Trimble Connect (${esc(e.message)}). Try again in a moment.`, "err-text small");
   }
+  geoEnabled = true;
+  const specs = await API.viewer.getModels("loaded").catch(() => []);
   const host = await regionHost();
-  for (const modelId of ids) {
-    if (geoReady(modelId)) continue;
+  for (const [i, modelId] of todo.entries()) {
     const spec = (Array.isArray(specs) ? specs : []).find((m) => m.id === modelId) || {};
     const name = spec.name || modelId;
+    const of = todo.length > 1 ? `Model ${i + 1} of ${todo.length}: ` : "";
     if (!/\.ifc(zip)?$/i.test(name) && !/ifc/i.test(spec.type || "")) {
       geoModels.set(modelId, { state: "error", name, message: "not an IFC file" });
-      geoStatus(`${esc(name)} isn't an IFC file, so its geometry can't be read here. Export it to IFC and upload that to the project.`, "err-text small");
       continue;
     }
     if (/\.ifczip$/i.test(name)) {
-      geoModels.set(modelId, { state: "error", name, message: "ifczip" });
-      geoStatus(`${esc(name)} is a zipped IFC, which isn't supported yet. Upload the unzipped IFC to the project.`, "err-text small");
+      geoModels.set(modelId, { state: "error", name, message: "zipped IFC, not supported yet" });
       continue;
     }
     try {
       geoModels.set(modelId, { state: "loading", name });
-      geoStatus(`Getting a download link for ${esc(name)}…`, "warn-text");
+      geoStatus(`${of}getting a download link for ${esc(name)}…`, "warn-text");
       const url = await downloadUrl(token, host, modelId, spec.versionId);
-      const bytes = await fetchWithProgress(url, name);
-      await openIfc(modelId, bytes, name);
+      const bytes = await fetchWithProgress(url, of + name);
+      await openIfc(modelId, bytes, name, of + name);
     } catch (e) {
       geoModels.set(modelId, { state: "error", name, message: String(e.message || e) });
-      log("Geometry download failed:", String(e.message || e));
-      geoStatus(`Couldn't download ${esc(name)} from Trimble Connect (${esc(e.message || e)}). Points use bounding boxes until it loads.`, "err-text small");
-      return;
+      log(`Geometry download failed for ${name}:`, String(e.message || e));
     }
   }
-  await attachGeometry();
+  await attachGeometry({ force: true });
 }
 
 // Give every selected element its real mesh (where the model's IFC is loaded), then recalculate.
-async function attachGeometry({ recalc: doRecalc = true } = {}) {
+async function attachGeometry({ recalc: doRecalc = true, force = false } = {}) {
   const seq = loadSeq;
   let found = 0, missing = 0;
   for (const modelId of [...new Set(rows.map((r) => r.modelId))]) {
@@ -348,9 +360,9 @@ async function attachGeometry({ recalc: doRecalc = true } = {}) {
     });
     alignModel(modelId, g);
   }
-  if (!found && !missing) return; // nothing new to attach
+  if (!found && !missing && !force) return; // nothing new to attach
   hmCache = { key: null, hm: null };
-  updateGeoStatus(found, missing);
+  updateGeoStatus();
   if (doRecalc) recalc();
 }
 
@@ -374,11 +386,22 @@ function shifted(r) {
 }
 const shiftPoint = (r, p) => { const o = geoModels.get(r.modelId)?.offset; return p && o ? { x: p.x + o.x, y: p.y + o.y, z: p.z + o.z } : p; };
 
-function updateGeoStatus(found, missing) {
-  const ready = [...geoModels.values()].filter((g) => g.state === "ready");
-  if (!ready.length) return;
+// One status line covering every model that has elements in the selection.
+function updateGeoStatus() {
+  const ids = [...new Set(rows.map((r) => r.modelId))];
+  const g = (id) => geoModels.get(id);
+  const ready = ids.filter((id) => g(id)?.state === "ready");
+  const failed = ids.filter((id) => g(id)?.state === "error");
+  const notLoaded = ids.filter((id) => !g(id));
+  if (!ready.length && !failed.length) return geoStatus("");
   const withMesh = rows.filter((r) => r.mesh).length;
-  geoStatus(`Using true geometry from ${ready.map((g) => esc(g.name)).join(", ")} – ${withMesh} of ${rows.length} selected element${rows.length === 1 ? "" : "s"} matched.${missing ? ` ${missing} couldn't be found in the IFC and use their bounding box.` : ""}`, withMesh ? "ok-text" : "warn-text");
+  const unmatched = rows.filter((r) => g(r.modelId)?.state === "ready" && !r.mesh).length;
+  const parts = [];
+  if (ready.length) parts.push(`Using true geometry from ${ready.map((id) => esc(g(id).name)).join(", ")} – ${withMesh} of ${rows.length} selected element${rows.length === 1 ? "" : "s"} matched.`);
+  if (unmatched) parts.push(`${unmatched} couldn't be found in ${ready.length > 1 ? "their" : "the"} IFC and use their bounding box.`);
+  for (const id of failed) parts.push(`${esc(g(id).name)} couldn't be loaded (${esc(g(id).message)}) – its elements use bounding boxes.`);
+  if (notLoaded.length) parts.push(`${notLoaded.length} more model${notLoaded.length > 1 ? "s" : ""} in the selection not loaded yet – press <em>Load true geometry</em>.`);
+  geoStatus(parts.join(" "), failed.length || notLoaded.length || unmatched ? "warn-text" : "ok-text");
 }
 
 function geometryHeightmap() {
@@ -427,6 +450,9 @@ async function loadSelection(sel) {
   }
   loading = false;
   recalc();
+  updateGeoStatus();
+  // Once true geometry is on, a selection that brings in another model loads that model too.
+  if (geoEnabled && rows.some((r) => !geoModels.get(r.modelId))) loadGeometryFromConnect().catch((e) => log("Geometry:", String(e)));
 }
 
 // Recompute masses/centres from cached data (cheap: runs on every setting/override change)

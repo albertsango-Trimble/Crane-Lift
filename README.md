@@ -10,7 +10,7 @@ Trimble Connect only gives extensions each element's **bounding box**. That's fi
 - **Lifting points on real steel:** points are laid out with the rules below, then placed on the actual top surface. Any point over a gap is moved onto the nearest steel. If moving them breaks the balance, the pattern is drawn in until the load is balanced and stable.
 - **Slopes, curves, arches and bent pieces** are handled automatically.
 
-How it gets the IFC: **Load true geometry** asks once for permission to use your Trimble Connect sign-in (Connect shows a prompt). It then downloads the IFC behind the selected model straight from your project, from the project's own region, and matches it to the selection by element GUIDs.
+How it gets the IFC: **Load true geometry** asks once for permission to use your Trimble Connect sign-in (Connect shows a prompt). It then downloads the IFC of **every model that has elements in the selection**, one after another, straight from your project and its region, and matches them to the selection by element GUIDs. If one model can't be loaded (not an IFC, or the download fails), the others still load; the status line lists any that failed, and their elements use bounding boxes. Pressing the button again retries only the failed ones. Once true geometry is on, a later selection that includes another model loads that model automatically.
 
 **Privacy:** the IFC is read **in your browser only** (with the open-source [web-ifc](https://github.com/ThatOpen/engine_web-ifc) library). It is not uploaded anywhere. Only the library code is fetched from jsDelivr.
 
