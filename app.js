@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -248,13 +248,15 @@ function planLift() {
   if (!result?.cog) return;
   const opts = { cog: result.cog, boxes: rows.map((r) => r.box), n: parseInt($("nPoints").value, 10), layout: $("layout").value };
   const tr = activeTrace();
+  if (!tr && !picking) traceStatus(""); // any trace message belonged to a different selection
   let plan;
   if (tr) {
     plan = COG.planOnAxis({ ...opts, pts: tr.pts });
     if (plan?.error) { lift = { error: plan.error }; return; }
   } else {
     // A bounding box is only a good stand-in for the top surface of flat, axis-aligned loads.
-    const flags = COG.looksSloped(result.box);
+    // Checked per element, ignoring columns and small parts (see COG.needsTrace).
+    const flags = COG.needsTrace(rows.map((r) => ({ box: r.box, kg: r.kg })));
     if (flags.sloped || flags.skewed) { lift = { needsTrace: true, flags }; return; }
     plan = COG.planLiftPoints(opts);
   }
