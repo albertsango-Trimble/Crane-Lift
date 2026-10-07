@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "2.0.0";
+const VERSION = "2.0.1";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -55,9 +55,13 @@ function onEvent(event, args) {
   }
 }
 
-function queueSelection(sel) {
+let queuedKey = null; // selection waiting to load (debounced)
+function queueSelection(sel, force = false) {
+  const k = keyOf(sel);
+  if (!force && (k === queuedKey || (queuedKey === null && k === selectionKey() && !loading))) return; // same as shown / already queued
+  queuedKey = k;
   clearTimeout(timer);
-  timer = setTimeout(() => loadSelection(sel).catch((e) => log("Error:", String(e))), 250);
+  timer = setTimeout(() => { queuedKey = null; loadSelection(sel).catch((e) => log("Error:", String(e))); }, 250);
 }
 
 // Re-read the viewer's current selection (after tracing, or from the Refresh button).
@@ -440,7 +444,7 @@ async function loadGeometryFromFile(file) {
 }
 
 // Give every selected element its real mesh (where the model's IFC is loaded), then recalculate.
-async function attachGeometry() {
+async function attachGeometry({ recalc: doRecalc = true } = {}) {
   const seq = loadSeq;
   let found = 0, missing = 0;
   for (const modelId of [...new Set(rows.map((r) => r.modelId))]) {
@@ -459,9 +463,10 @@ async function attachGeometry() {
     });
     alignModel(modelId, g);
   }
+  if (!found && !missing) return; // nothing new to attach
   hmCache = { key: null, hm: null };
   updateGeoStatus(found, missing);
-  recalc();
+  if (doRecalc) recalc();
 }
 
 // The viewer and the IFC normally share coordinates. If a model was moved in Connect, the meshes
@@ -501,13 +506,15 @@ function geometryHeightmap() {
 // ---------- data loading ----------
 let loadSeq = 0; // only the most recent selection load is allowed to update the panel
 
+let loading = false;
 async function loadSelection(sel) {
   const seq = ++loadSeq;
+  loading = true;
   const newSel = Array.isArray(sel) ? sel.filter((m) => m.objectRuntimeIds?.length) : [];
   const total = newSel.reduce((n, m) => n + m.objectRuntimeIds.length, 0);
   $("selCount").textContent = total;
   log(`Selection: ${total} object${total === 1 ? "" : "s"}`);
-  if (!total) { selection = []; rows = []; return recalc(); } // clears the result, plan and markups
+  if (!total) { selection = []; rows = []; loading = false; return recalc(); } // clears the result, plan and markups
   if (total > MAX_OBJECTS) log(`${total} objects selected – only the first ${MAX_OBJECTS} are used.`);
 
   $("elements").innerHTML = '<span class="muted">Reading properties…</span>';
@@ -529,8 +536,12 @@ async function loadSelection(sel) {
   if (seq !== loadSeq) return;
   selection = newSel;
   rows = newRows;
+  if (rows.some((r) => geoReady(r.modelId))) {
+    await attachGeometry({ recalc: false }).catch((e) => log("Geometry:", String(e)));
+    if (seq !== loadSeq) return;
+  }
+  loading = false;
   recalc();
-  if (rows.some((r) => geoReady(r.modelId))) attachGeometry().catch((e) => log("Geometry:", String(e)));
 }
 
 // Recompute masses/centres from cached data (cheap: runs on every setting/override change)
@@ -637,7 +648,23 @@ function liftStatus(html, cls = "muted") {
 const LIFT_ICON_BASE = 880000; // ids for the icon fallback
 let liftIcons = [];
 
-async function drawLift() {
+// What the 3D view should show, rounded to the millimetre / kilogram. If it hasn't changed since
+// the last draw, the markups are left alone instead of being deleted and redrawn.
+let drawnSig = null, liftIdsUnknown = false;
+function liftSignature() {
+  if (!lift || !lift.points) return `none:${lift?.needsTrace ? 1 : 0}:${lift?.awaitingPicks ? 1 : 0}:${lift?.error || ""}`;
+  const r = (v) => Math.round(v * 1000);
+  return JSON.stringify([
+    lift.points.map((p) => [r(p.x), r(p.y), r(p.z)]),
+    $("labels").checked ? lift.shares?.kg.map((v) => Math.round(v)) : 0,
+    lift.slings ? [r(lift.slings.hook.x), r(lift.slings.hook.y), r(lift.slings.hook.z)] : 0,
+  ]);
+}
+
+async function drawLift({ force = false } = {}) {
+  const sig = liftSignature();
+  if (!force && sig === drawnSig) return; // nothing to change in the 3D view
+  drawnSig = sig;
   await clearLift();
   if (!lift || !lift.points) {
     liftStatus(lift?.needsTrace ? "Not drawn – trace the element first (see below)."
@@ -676,6 +703,7 @@ async function drawLift() {
     } catch (e) { problems.push(`Sling lines failed (${esc(e.message || e)}).`); }
   }
   liftIds = ids;
+  liftIdsUnknown = !ids.length && !liftIcons.length; // viewer didn't report ids – sweep by colour next time
 
   const where = lift.points.map((p) => `${p.label} (${f(p.x, 2)}, ${f(p.y, 2)}, ${f(p.z, 2)})`).join(", ");
   log(`Lifting points drawn: ${where}`);
@@ -687,12 +715,15 @@ async function drawLift() {
   }
 }
 
-async function clearLift() {
+let liftSwept = false;
+async function clearLift({ sweep = false } = {}) {
   if (liftIds.length) await API.markup.removeMarkups(liftIds).catch(() => {});
   liftIds = [];
   if (liftIcons.length) await API.viewer.removeIcon(liftIcons).catch(() => {});
   liftIcons = [];
-  await sweepMarkups(LIFT_COLOR);
+  // Searching the viewer for stray blue markups is only needed once (leftovers from an earlier
+  // session), when the viewer didn't report ids, or when the user hides the points.
+  if (sweep || liftIdsUnknown || !liftSwept) { await sweepMarkups(LIFT_COLOR); liftSwept = true; liftIdsUnknown = false; }
 }
 
 // ---------- rendering ----------
@@ -819,21 +850,26 @@ function renderElements() {
 
 // ---------- actions ----------
 let markerVisible = false; // when shown, the pink COG point follows the selection
-async function showMarker() {
+let markerSig = null, markerSwept = false;
+async function showMarker({ force = false } = {}) {
+  const sig = result?.cog ? ["x", "y", "z"].map((k) => Math.round(result.cog[k] * 1000)).join(",") : "none";
+  if (!force && sig === markerSig) return; // COG hasn't moved
+  markerSig = sig;
   await clearMarker();
   if (!result?.cog) return;
   // Single point measurement markup (same as the viewer's Measure → Single point tool).
   // MarkupPick positions are in millimetres; result.cog is in metres.
   const [id] = await addMarkups("addSinglePointMarkups", [{ color: MARKER_COLOR, start: mm(result.cog) }]);
   markerId = id ?? null;
+  if (markerId == null) markerSwept = false; // no id reported – find it by colour next time
   log(`COG point placed at ${f(result.cog.x)}, ${f(result.cog.y)}, ${f(result.cog.z)} m`);
 }
 
 async function clearMarker() {
   // Only removes our own (pink) COG point – the user's other measurements are left alone.
   if (markerId != null) await API.markup.removeMarkups([markerId]).catch(() => {});
+  else if (!markerSwept) { await sweepMarkups(MARKER_COLOR); markerSwept = true; } // leftovers / unknown id
   markerId = null;
-  await sweepMarkups(MARKER_COLOR);
 }
 
 async function fit() {
@@ -878,13 +914,13 @@ async function main() {
   }
 }
 
-$("btnMarker").onclick = () => { markerVisible = true; if (!result?.cog) log("Nothing to mark yet."); showMarker().catch((e) => log("COG marker failed:", String(e))); };
-$("btnClear").onclick = () => { markerVisible = false; clearMarker().catch((e) => log(String(e))); };
+$("btnMarker").onclick = () => { markerVisible = true; if (!result?.cog) log("Nothing to mark yet."); showMarker({ force: true }).catch((e) => log("COG marker failed:", String(e))); };
+$("btnClear").onclick = () => { markerVisible = false; markerSig = null; markerSwept = false; clearMarker().catch((e) => log(String(e))); };
 $("btnFit").onclick = () => fit().catch((e) => log(String(e)));
 $("btnCopy").onclick = () => copyResult().catch((e) => log(String(e)));
-$("btnLift").onclick = () => { liftVisible = true; drawLift().catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }); };
+$("btnLift").onclick = () => { liftVisible = true; drawLift({ force: true }).catch((e) => { log("Lifting points:", String(e)); liftStatus(esc(String(e)), "err-text small"); }); };
 $("version").textContent = `v${VERSION}`;
-$("btnLiftClear").onclick = () => { liftVisible = false; clearLift().then(() => liftStatus("Lifting points hidden.")).catch((e) => log(String(e))); };
+$("btnLiftClear").onclick = () => { liftVisible = false; drawnSig = null; clearLift({ sweep: true }).then(() => liftStatus("Lifting points hidden.")).catch((e) => log(String(e))); };
 $("density").onchange = recalc;
 $("units").onchange = recalc;
 for (const id of ["nPoints", "layout", "hookHeight", "labels"]) $(id).onchange = recalc;
@@ -899,7 +935,7 @@ $("geoFile").onchange = (e) => loadGeometryFromFile(e.target.files?.[0]);
 $("btnRefresh").onclick = async () => {
   if (picking) finishTrace();
   const sel = await API?.viewer.getSelection().catch(() => null);
-  if (sel) queueSelection(sel);
+  if (sel) queueSelection(sel, true);
 };
 
 main();
