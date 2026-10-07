@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "1.6.1";
+const VERSION = "1.7.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
