@@ -232,18 +232,32 @@
       const c = solve(M, r);
       const quad = c && ((s) => c[0] + c[1] * (s - sm) + c[2] * (s - sm) ** 2);
       const rms = quad ? Math.sqrt(S.reduce((a, q) => a + (quad(q.s) - q.z) ** 2, 0) / n) : Infinity;
-      if (quad && rms <= 0.03) {
+      if (quad && (rms <= 0.01 || (n === 3 && rms <= 0.03))) {
         zAt = quad;
         // Call it straight if the curve never strays more than 2 cm from its chord.
         const chord = (s) => quad(sMin) + ((quad(sMax) - quad(sMin)) * (s - sMin)) / (sMax - sMin);
         kind = Math.abs(quad((sMin + sMax) / 2) - chord((sMin + sMax) / 2)) > 0.02 ? "curved" : "straight";
       } else {
-        // Piecewise-linear through the clicks, extended along the end segments.
+        // Not a parabola (e.g. a circular arch): smooth curve through every click,
+        // continued straight beyond the end clicks.
+        const xs = S.map((q) => q.s), ys = S.map((q) => q.z);
+        const d = xs.slice(1).map((x, i) => (ys[i + 1] - ys[i]) / (x - xs[i] || 1e-9));
+        const hs = xs.slice(1).map((x, i) => x - xs[i] || 1e-9);
+        // Slope at each click from the parabola through it and its neighbours (exact for parabolas,
+        // within a few mm for circular arches); ends use the parabola through the end three clicks.
+        const t = xs.map((_, i) => {
+          if (i === 0) return d[0] + ((d[0] - d[1]) * hs[0]) / (hs[0] + hs[1]);
+          if (i === n - 1) return d[n - 2] + ((d[n - 2] - d[n - 3]) * hs[n - 2]) / (hs[n - 3] + hs[n - 2]);
+          return (d[i - 1] * hs[i] + d[i] * hs[i - 1]) / (hs[i - 1] + hs[i]);
+        });
         zAt = (s) => {
+          if (s <= xs[0]) return ys[0] + t[0] * (s - xs[0]);
+          if (s >= xs[n - 1]) return ys[n - 1] + t[n - 1] * (s - xs[n - 1]);
           let i = 0;
-          while (i < n - 2 && s > S[i + 1].s) i++;
-          const A = S[i], B = S[i + 1];
-          return A.z + ((B.z - A.z) * (s - A.s)) / (B.s - A.s || 1);
+          while (i < n - 2 && s > xs[i + 1]) i++;
+          const hgt = xs[i + 1] - xs[i], u = (s - xs[i]) / hgt;
+          const h00 = 2 * u ** 3 - 3 * u ** 2 + 1, h10 = u ** 3 - 2 * u ** 2 + u, h01 = -2 * u ** 3 + 3 * u ** 2, h11 = u ** 3 - u ** 2;
+          return h00 * ys[i] + h10 * hgt * t[i] + h01 * ys[i + 1] + h11 * hgt * t[i + 1];
         };
         kind = "curved";
       }
@@ -298,7 +312,7 @@
     if (used === "area" && roomV <= 0.05) { used = "line"; notes.push("Element is too narrow to spread points across its width – placed in a line instead."); }
 
     const vClick = (prof.o.x - cog.x) * nrm.x + (prof.o.y - cog.y) * nrm.y; // where the trace was clicked, across the load
-    const mem = memberLayout({ bs, cog, h, nrm, n, L, sLo: t0 - sc + m, sHi: t1 - sc - m, zAt: (ds) => zAt(sc + ds), refV: vClick });
+    const mem = memberLayout({ bs, cog, h, nrm, n, L, sLo: t0 - sc + m, sHi: t1 - sc - m, zAt: (ds) => zAt(sc + ds), refV: vClick, layout });
     if (mem) {
       used = "members"; notes.push(...mem.notes);
       for (const p of mem.points) p.extrapolated = sc + p.s < sMin - 0.05 || sc + p.s > sMax + 0.05;
@@ -336,7 +350,7 @@
    *   zAt(s): traced top height (traced loads) – shifted by each member's top relative to the
    *           traced member (refV = where the trace was clicked). Without zAt the box top is used.
    */
-  function memberLayout({ bs, cog, h, nrm, n, L, sLo, sHi, zAt, refV }) {
+  function memberLayout({ bs, cog, h, nrm, n, L, sLo, sHi, zAt, refV, layout = "auto" }) {
     if (n < 2) return null;
     const carriers = [];
     for (const box of bs) {
@@ -349,12 +363,25 @@
       if (along >= 0.6 * L && lat <= Math.max(0.6, 0.15 * along)) carriers.push({ box, s0, s1, v: (v0 + v1) / 2, lat });
     }
     if (carriers.length < 2) return null;
-    if (carriers.some((c) => Math.abs(c.v) <= Math.max(0.15, c.lat / 2))) return null; // a member runs along the COG line
+    // A member along the COG line: a 2-point lift or an explicit "Along length" layout goes on that
+    // member (the normal line layout). Wider lifts still use the outer members – a wider stance.
+    const centre = carriers.filter((c) => Math.abs(c.v) <= Math.max(0.15, c.lat / 2))
+      .sort((a, b) => Math.abs(a.v) - Math.abs(b.v))[0];
+    if (centre && (n === 2 || layout === "line")) return null;
     const A = carriers.reduce((a, c) => (c.v < a.v ? c : a)), B = carriers.reduce((a, c) => (c.v > a.v ? c : a));
-    if (!(A.v < 0 && B.v > 0)) return null; // all members on one side – nothing to straddle
+    if (!(A.v < -0.15 && B.v > 0.15)) return null; // nothing either side of the COG to straddle
 
     const m = Math.max(0.05, 0.02 * L);
-    const lo = Math.max(sLo, A.s0 + m, B.s0 + m), hi = Math.min(sHi, A.s1 - m, B.s1 - m);
+    // Spread the points over as many members as the count allows: r members (outermost always
+    // included, the rest evenly spaced across), each with n / r points along its length.
+    // e.g. 3 arches: 4 → 2 outer × 2, 6 → 3 × 2;  5 arches: 10 → 5 × 2, 8 → 4 × 2.
+    const sorted = carriers.slice().sort((a, b) => a.v - b.v);
+    const k = sorted.length;
+    let r = 2;
+    if (n >= 4) for (let t = Math.min(k, Math.floor(n / 2)); t >= 2; t--) if (n % t === 0) { r = t; break; }
+    const rows = n === 2 || n === 3 ? [A, B]
+      : Array.from({ length: r }, (_, i) => sorted[Math.round((i * (k - 1)) / (r - 1))]);
+    const lo = Math.max(sLo, ...rows.map((c) => c.s0 + m)), hi = Math.min(sHi, ...rows.map((c) => c.s1 - m));
     const room = Math.min(-lo, hi);
     if (!(room > 0)) return null;
 
@@ -366,7 +393,7 @@
       place = [[-p, nearC], [p, nearC], [0, farC]];
     } else {
       place = [];
-      for (const ds of rowOffsets(Math.ceil(n / 2), L, room)) place.push([ds, A], [ds, B]);
+      for (const ds of rowOffsets(n / rows.length, L, room)) for (const c of rows) place.push([ds, c]);
     }
     const ref = refV == null ? null : carriers.reduce((a, c) => (Math.abs(c.v - refV) < Math.abs(a.v - refV) ? c : a));
     const points = place.map(([ds, c], i) => ({
@@ -376,7 +403,9 @@
       z: zAt ? zAt(ds) + (ref ? c.box.max.z - ref.box.max.z : 0) : c.box.max.z,
       snapped: false, onElement: true, extrapolated: false, s: ds,
     }));
-    const notes = [`The centre line of this load is open, so the points are on the two outer members either side of the centre of gravity (${(B.v - A.v).toFixed(2)} m apart).`];
+    const notes = [rows.length > 2
+      ? `Points are on ${rows.length} of the ${k} long members (${n / rows.length} on each), spread across the load from edge to edge, so none fall in the gaps between members.`
+      : `Points are on the two outer long members either side of the centre of gravity (${(B.v - A.v).toFixed(2)} m apart), so none fall in the gaps between members.`];
     if (n === 2) notes.push("With 2 points side by side the load can tip end-to-end about the line between them – use 4 points for better control.");
     return { points, notes, spread: B.v - A.v };
   }
@@ -407,8 +436,8 @@
     if (n >= 2) {
       const mv2 = Math.max(0.05, 0.02 * Lv);
       const tries = [
-        [U, memberLayout({ bs, cog, h: hU, nrm: nV, n, L: Lu, sLo: ub.min[U] - uc + mu, sHi: ub.max[U] - uc - mu })],
-        [V, memberLayout({ bs, cog, h: nV, nrm: hU, n, L: Lv, sLo: ub.min[V] - vc + mv2, sHi: ub.max[V] - vc - mv2 })],
+        [U, memberLayout({ bs, cog, h: hU, nrm: nV, n, L: Lu, sLo: ub.min[U] - uc + mu, sHi: ub.max[U] - uc - mu, layout })],
+        [V, memberLayout({ bs, cog, h: nV, nrm: hU, n, L: Lv, sLo: ub.min[V] - vc + mv2, sHi: ub.max[V] - vc - mv2, layout })],
       ].filter(([, m]) => m);
       if (tries.length) {
         const [ax, mem] = tries.reduce((a, b) => (b[1].spread > a[1].spread ? b : a));
