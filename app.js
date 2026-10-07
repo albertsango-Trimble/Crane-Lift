@@ -10,7 +10,7 @@ let liftIds = [];        // markup ids for lifting points, labels and sling line
 let liftVisible = true;  // shown by default; markups follow changes automatically
 let lift = null;         // last lifting plan
 const MAX_OBJECTS = 1000;
-const VERSION = "2.0.1";
+const VERSION = "2.2.0";
 
 let API = null;
 let selection = [];   // [{ modelId, objectRuntimeIds }]
@@ -41,11 +41,11 @@ function onEvent(event, args) {
   if (event === "viewer.onSelectionChanged") {
     const sel = args?.data ?? args ?? [];
     if (picking) {
-      // Clicks made while tracing can re-select or clear the traced element – ignore those.
-      // Selecting a different element means the user has moved on: end the trace and follow them.
+      // Clicks made while picking can re-select or clear the element – ignore those.
+      // Selecting a different element means the user has moved on: stop picking and follow them.
       const k = keyOf(sel);
       if (!k || k === picking.key) return;
-      finishTrace();
+      finishPicking();
     }
     queueSelection(sel);
   } else if (event === "viewer.onPicked") {
@@ -69,21 +69,16 @@ async function resyncSelection() {
   if (!API) return;
   const sel = await API.viewer.getSelection().catch(() => null);
   const k = keyOf(sel);
-  // An empty selection here usually means tracing clicks cleared it – keep the traced element.
+  // An empty selection here usually means picking clicks cleared it – keep the element.
   if (k && k !== selectionKey()) queueSelection(sel);
 }
 
-// ---------- tracing a sloped / skewed element ----------
-// The user clicks two points on the TOP of the element; the line between them gives the
-// member's real direction and top-surface height, which a bounding box can't.
-let trace = null;   // { key, a, b, source } in metres, tied to one selection
+// ---------- picking lifting points by hand ----------
+// For shapes where you want to choose the attachment points yourself (designed lugs, special
+// rigging), the user clicks where each sling attaches. Clicks snap to the model surface.
 let picking = null; // { key, pts: [] } while waiting for clicks
 let pickTimeout = null;
-
 const selectionKey = () => keyOf(selection);
-const activeTrace = () => (trace && trace.key === selectionKey() ? trace : null);
-
-function traceStatus(html, cls = "hint") { $("traceStatus").className = cls; $("traceStatus").innerHTML = html; }
 
 // Picked positions come in the viewer's units; choose the scale that puts them on the selection.
 function toMetres(pos) {
@@ -93,36 +88,33 @@ function toMetres(pos) {
   return k ? { x: pos.x * k, y: pos.y * k, z: pos.z * k } : null;
 }
 
-const TRACE_LABEL = "Trace element", PICK_LABEL = "Pick lifting points";
-const pickTool = (text, title = "Lift COG – trace element") => API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title, text } });
+const PICK_LABEL = "Pick lifting points";
+const pickTool = (text) => API.viewer.activateTool("picking", { snapTypes: ["surface", "edge", "point"], instruction: { title: "Lift COG – pick lifting points", text } });
 
-// ---------- picking lifting points by hand ----------
-// For shapes a bounding box can't describe (bent, cranked, built-up pieces) the user clicks where each
-// sling attaches. Clicks snap to the model surface, so every point is on the element.
 const manual = new Map(); // selection key → [{ x, y, z }] in metres
 const activeManual = () => manual.get(selectionKey()) || null;
 function pickStatus(html, cls = "hint") { $("pickStatus").className = cls; $("pickStatus").innerHTML = html; }
 
 async function startPickLift() {
-  if (picking) return finishTrace();
+  if (picking) return finishPicking();
   if (!result?.box) return pickStatus("Select the element first.", "err-text small");
   const key = selectionKey();
   manual.set(key, []);
-  picking = { key, pts: [], mode: "lift" };
+  picking = { key, pts: [] };
   $("btnPickLift").textContent = "Finish picking";
   pickStatus("<strong>Click the element where each sling attaches.</strong> Loads update after every click.", "warn-text");
   recalc();
   armTimeout();
   try {
-    await pickTool("Click where each sling attaches", "Lift COG – pick lifting points");
+    await pickTool("Click where each sling attaches");
   } catch (e) {
-    cancelTrace();
+    stopPicking();
     pickStatus(`The viewer's picking tool isn't available (${esc(e.message || e)}).`, "err-text small");
   }
 }
 
 function clearPicked() {
-  if (picking?.mode === "lift") cancelTrace();
+  if (picking) stopPicking();
   manual.delete(selectionKey());
   pickStatus("");
   recalc();
@@ -136,44 +128,24 @@ function showPickStatus() {
   pickStatus(`${pts.length} point${pts.length > 1 ? "s" : ""} picked on the model. ${ok ? "The lift is stable – see the loads below." : "Not stable yet – see below."} <em>Clear picked points</em> returns to automatic placement.`, ok ? "ok-text" : "warn-text");
 }
 
-async function startTrace() {
-  if (picking) return finishTrace();
-  if (!result?.box) return traceStatus("Select the element first.", "err-text small");
-  picking = { key: selectionKey(), pts: [], mode: "trace" };
-  $("btnTrace").textContent = "Finish trace";
-  traceStatus("<strong>Click the top of the element near one end.</strong>", "warn-text");
-  armTimeout();
-  try {
-    await pickTool("Click the top of the element near one end");
-  } catch (e) {
-    cancelTrace(`The viewer's picking tool isn't available (${esc(e.message || e)}). Use <em>Use measured points</em> instead.`, "err-text small");
-  }
-}
-
 function armTimeout() {
   clearTimeout(pickTimeout);
-  pickTimeout = setTimeout(() => picking && (picking.pts.length >= 2 || picking.mode === "lift" ? finishTrace()
-    : cancelTrace("Trace timed out. If clicks aren't being picked up, use <em>Use measured points</em> instead.")), 120000);
+  pickTimeout = setTimeout(() => picking && finishPicking(), 120000);
 }
 
-// Stop listening for clicks. The trace made so far (2+ points) stays in use.
-function finishTrace() {
-  const n = picking?.pts.length || 0;
-  if (picking?.mode === "lift") { cancelTrace(); return showPickStatus(); }
-  cancelTrace();
-  if (n < 2) return traceStatus("Trace cancelled – it needs at least 2 points.");
-  showTraceStatus();
+// Stop listening for clicks; the points picked so far stay in use.
+function finishPicking() {
+  stopPicking();
+  showPickStatus();
 }
 
-function cancelTrace(msg, cls = "hint") {
+function stopPicking() {
   const wasPicking = !!picking;
   picking = null;
   clearTimeout(pickTimeout);
-  $("btnTrace").textContent = TRACE_LABEL;
   $("btnPickLift").textContent = PICK_LABEL;
   API?.viewer.activateTool("reset").catch(() => {});
-  if (msg) traceStatus(msg, cls);
-  if (wasPicking) setTimeout(() => resyncSelection(), 300); // catch any selection change made while tracing
+  if (wasPicking) setTimeout(() => resyncSelection(), 300); // catch any selection change made while picking
 }
 
 function onPicked(data) {
@@ -181,74 +153,21 @@ function onPicked(data) {
   const det = Array.isArray(data) ? data[0] : data;
   if (!det?.position) return;
   const p = toMetres(det.position);
-  if (picking.mode === "lift") {
-    if (!p) return pickStatus("That click wasn't on the selected element – click on it.", "err-text small");
-    picking.pts.push(p);
-    manual.set(picking.key, picking.pts.slice());
-    armTimeout();
-    log(`Lifting point ${picking.pts.length}: ${f(p.x)}, ${f(p.y)}, ${f(p.z)} m`);
-    recalc();
-    const ok = lift?.shares?.stable;
-    pickStatus(`<strong>${picking.pts.length} point${picking.pts.length > 1 ? "s" : ""} picked.</strong> ${picking.pts.length < 2 ? "Keep clicking." : ok ? "Stable – keep clicking to add more, or press <em>Finish picking</em>." : "Not stable yet – the centre of gravity must be inside the points. Keep clicking."}`, ok ? "ok-text" : "warn-text");
-    pickTool("Click where the next sling attaches, or press Finish picking", "Lift COG – pick lifting points").catch(() => {});
-    return;
-  }
-  if (!p) return traceStatus("That click wasn't on the selected element – click its top surface.", "err-text small");
+  if (!p) return pickStatus("That click wasn't on the selected element – click on it.", "err-text small");
   picking.pts.push(p);
+  manual.set(picking.key, picking.pts.slice());
   armTimeout();
-  log(`Trace point ${picking.pts.length}: ${f(p.x)}, ${f(p.y)}, ${f(p.z)} m`);
-  if (picking.pts.length === 1) {
-    traceStatus("<strong>Now click the top near the other end.</strong>", "warn-text");
-    pickTool("Now click the top near the other end").catch(() => {});
-    return;
-  }
-  // From the 2nd click on, apply the trace live; each extra click refines the curve.
-  setTrace(picking.key, picking.pts.slice(), "clicked");
-  traceStatus(`<strong>${picking.pts.length} points traced.</strong> Curved element? Keep clicking along the top (e.g. the middle) – the points update as you go. Press <em>Finish trace</em> when done.`, "warn-text");
-  pickTool("Click more points along the top, or press Finish trace").catch(() => {});
-}
-
-function setTrace(key, pts, source) {
-  trace = { key, pts, source };
+  log(`Lifting point ${picking.pts.length}: ${f(p.x)}, ${f(p.y)}, ${f(p.z)} m`);
   recalc();
-  if (!picking) showTraceStatus();
-}
-
-function showTraceStatus() {
-  if (!trace) return;
-  const how = trace.source === "measured" ? "your measured points" : "your clicks";
-  if (lift?.error) return traceStatus(esc(lift.error), "err-text small");
-  const shape = lift?.curve === "curved" ? `curved, top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : "straight";
-  const tip = trace.pts.length === 2 ? " If the element is curved, trace again and click a third point near the middle." : "";
-  traceStatus(`Traced from ${trace.pts.length} of ${how} (${shape}). Points follow the element.${tip}`, "ok-text");
-}
-
-// Fallback: use the Single point measurements the user placed on the selection (positions are mm).
-async function traceFromMeasurements() {
-  if (!result?.box) return traceStatus("Select the element first.", "err-text small");
-  const list = await API.markup.getSinglePointMarkups().catch(() => []);
-  const box = result.box;
-  const onSel = (p) => ["x", "y", "z"].every((c) => p[c] >= box.min[c] - 1 && p[c] <= box.max[c] + 1);
-  const pts = (Array.isArray(list) ? list : [])
-    .filter((m) => m.start && !sameColor(m.color, LIFT_COLOR) && !sameColor(m.color, MARKER_COLOR))
-    .map((m) => ({ x: m.start.positionX / 1000, y: m.start.positionY / 1000, z: m.start.positionZ / 1000 }))
-    .filter(onSel);
-  if (pts.length < 2) {
-    return traceStatus("Place at least two <strong>Measure → Single point</strong> measurements on the top of the element (near each end, plus the middle if it's curved), then press this again.", "err-text small");
-  }
-  setTrace(selectionKey(), pts, "measured");
-}
-
-function clearTrace() {
-  trace = null;
-  traceStatus("");
-  recalc();
+  const ok = lift?.shares?.stable;
+  pickStatus(`<strong>${picking.pts.length} point${picking.pts.length > 1 ? "s" : ""} picked.</strong> ${picking.pts.length < 2 ? "Keep clicking." : ok ? "Stable – keep clicking to add more, or press <em>Finish picking</em>." : "Not stable yet – the centre of gravity must be inside the points. Keep clicking."}`, ok ? "ok-text" : "warn-text");
+  pickTool("Click where the next sling attaches, or press Finish picking").catch(() => {});
 }
 
 // ---------- true geometry (IFC read in the browser) ----------
 // The viewer only exposes bounding boxes, so for the real shape the extension reads the model's
-// IFC itself: downloaded from Trimble Connect with the user's own access, or picked from their
-// computer. Nothing is uploaded anywhere – it stays in this browser tab.
+// IFC itself, downloaded from Trimble Connect with the user's own access. Nothing is uploaded
+// anywhere – it stays in this browser tab.
 const WEBIFC_VERSION = "0.0.78";
 const WEBIFC_CDN = `https://cdn.jsdelivr.net/npm/web-ifc@${WEBIFC_VERSION}/`;
 const REGION_HOSTS = {
@@ -375,8 +294,8 @@ async function loadGeometryFromConnect() {
   let token;
   try { token = await getAccessToken(); } catch (e) {
     return geoStatus(e.message === "denied"
-      ? "Access wasn't allowed, so the model can't be downloaded. You can reset this in the extension's settings, or use <em>Load IFC from computer</em>."
-      : `Couldn't get access to Trimble Connect (${esc(e.message)}). Use <em>Load IFC from computer</em> instead.`, "err-text small");
+      ? "Access wasn't allowed, so the model can't be downloaded. You can reset this in the extension's settings and try again."
+      : `Couldn't get access to Trimble Connect (${esc(e.message)}). Try again in a moment.`, "err-text small");
   }
   const host = await regionHost();
   for (const modelId of ids) {
@@ -385,12 +304,12 @@ async function loadGeometryFromConnect() {
     const name = spec.name || modelId;
     if (!/\.ifc(zip)?$/i.test(name) && !/ifc/i.test(spec.type || "")) {
       geoModels.set(modelId, { state: "error", name, message: "not an IFC file" });
-      geoStatus(`${esc(name)} isn't an IFC file, so its geometry can't be read here. Export it to IFC, or use <em>Load IFC from computer</em>.`, "err-text small");
+      geoStatus(`${esc(name)} isn't an IFC file, so its geometry can't be read here. Export it to IFC and upload that to the project.`, "err-text small");
       continue;
     }
     if (/\.ifczip$/i.test(name)) {
       geoModels.set(modelId, { state: "error", name, message: "ifczip" });
-      geoStatus(`${esc(name)} is a zipped IFC, which isn't supported yet. Use <em>Load IFC from computer</em> with the unzipped file.`, "err-text small");
+      geoStatus(`${esc(name)} is a zipped IFC, which isn't supported yet. Upload the unzipped IFC to the project.`, "err-text small");
       continue;
     }
     try {
@@ -402,45 +321,11 @@ async function loadGeometryFromConnect() {
     } catch (e) {
       geoModels.set(modelId, { state: "error", name, message: String(e.message || e) });
       log("Geometry download failed:", String(e.message || e));
-      geoStatus(`Couldn't download ${esc(name)} from Trimble Connect (${esc(e.message || e)}). Use <em>Load IFC from computer</em> instead – the file stays on your machine.`, "err-text small");
+      geoStatus(`Couldn't download ${esc(name)} from Trimble Connect (${esc(e.message || e)}). Points use bounding boxes until it loads.`, "err-text small");
       return;
     }
   }
   await attachGeometry();
-}
-
-// Fallback: the user picks the IFC on their computer. It's matched to the selection by element GUIDs.
-async function loadGeometryFromFile(file) {
-  if (!file) return;
-  const ids = [...new Set(selection.map((m) => m.modelId))];
-  if (!ids.length) return geoStatus("Select the elements first, then load the IFC.", "err-text small");
-  try {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    const api = await getIfcApi();
-    geoStatus(`Reading ${esc(file.name)} (${(bytes.length / 1e6).toFixed(1)} MB)…`, "warn-text");
-    await new Promise((r) => setTimeout(r, 30));
-    const model = await GEO.GeoModel.open(window.WebIFC, api, bytes);
-    // Which selected model does this file belong to? Check a few element GUIDs.
-    let matched = 0;
-    for (const sel of selection) {
-      const guids = await API.viewer.convertToObjectIds(sel.modelId, sel.objectRuntimeIds.slice(0, 5)).catch(() => []);
-      if (guids.some((g) => model.expressIdFor(g) != null)) {
-        const prev = geoModels.get(sel.modelId);
-        if (prev?.model && prev.model !== model) prev.model.close();
-        geoModels.set(sel.modelId, { state: "ready", model, name: file.name, offset: null });
-        matched++;
-      }
-    }
-    if (!matched) {
-      model.close();
-      return geoStatus(`${esc(file.name)} doesn't contain the selected elements. Pick the IFC that this model was made from.`, "err-text small");
-    }
-    await attachGeometry();
-  } catch (e) {
-    geoStatus(`Couldn't read ${esc(file.name)} (${esc(e.message || e)}).`, "err-text small");
-  } finally {
-    $("geoFile").value = "";
-  }
 }
 
 // Give every selected element its real mesh (where the model's IFC is loaded), then recalculate.
@@ -579,9 +464,8 @@ function planLift() {
   lift = null;
   if (!result?.cog) return;
   const opts = { cog: result.cog, boxes: rows.map((r) => (r.box ? { ...r.box, kg: r.kg } : null)), n: parseInt($("nPoints").value, 10), layout: $("layout").value };
-  const tr = activeTrace(), man = activeManual();
-  if (!tr && !picking) traceStatus(""); // any trace message belonged to a different selection
-  if (!man && !picking) pickStatus("");
+  const man = activeManual();
+  if (!man && !picking) pickStatus(""); // any picking message belonged to a different selection
   let plan;
   if (man) {
     // Points the user clicked on the model – used exactly as picked.
@@ -595,9 +479,6 @@ function planLift() {
     if (plan?.error) { lift = { error: plan.error }; return; }
     const without = rows.filter((r) => !r.mesh).length;
     if (plan && without) plan.notes.push(`${without} element${without > 1 ? "s" : ""} weren't found in the IFC, so ${without > 1 ? "they aren't" : "it isn't"} used for placing points.`);
-  } else if (tr) {
-    plan = COG.planOnAxis({ ...opts, pts: tr.pts });
-    if (plan?.error) { lift = { error: plan.error, offTrace: plan.offTrace }; return; }
   } else {
     // A bounding box is only a good stand-in for the top surface of flat, axis-aligned loads.
     // Checked per element, ignoring columns and small parts (see COG.needsTrace).
@@ -667,7 +548,7 @@ async function drawLift({ force = false } = {}) {
   drawnSig = sig;
   await clearLift();
   if (!lift || !lift.points) {
-    liftStatus(lift?.needsTrace ? "Not drawn – trace the element first (see below)."
+    liftStatus(lift?.needsTrace ? "Not drawn – load true geometry or pick the points (see below)."
       : lift?.awaitingPicks ? "Click the element where each sling attaches."
       : lift?.error ? "Not drawn – see below." : "", lift ? "warn-text" : "muted");
     return;
@@ -730,10 +611,18 @@ async function clearLift({ sweep = false } = {}) {
 function render() {
   // With true geometry the real top surface is known, so tracing isn't needed.
   const usingGeo = rows.some((r) => r.mesh);
-  $("traceBox").hidden = usingGeo && !activeTrace();
+  void usingGeo;
   renderResult();
   renderLift();
   renderElements();
+}
+
+// One-line description of how the points were placed.
+function layoutText(l) {
+  const how = { members: "on the members either side of the COG", area: "spread over the load", line: "in a line along the load", single: "single point over the COG" }[l.layout] || l.layout;
+  if (l.layout === "picked") return `${l.points.length} point${l.points.length > 1 ? "s" : ""} you picked on the model (on its surface). Hook directly above the centre of gravity.`;
+  if (l.axis === "geometry") return `Placed on the real top surface of the steel, from the model's IFC (true geometry). Layout: ${how}.`;
+  return `Layout: ${how}. Points sit on top of the element below them (from its bounding box).`;
 }
 
 function renderLift() {
@@ -750,8 +639,8 @@ function renderLift() {
     return;
   }
   if (lift.needsTrace) {
-    const what = [lift.flags.sloped && "sloped", lift.flags.skewed && "running diagonally in plan"].filter(Boolean).join(" and ");
-    $("liftResult").innerHTML = `<p class="warn-text"><strong>This load looks ${what}.</strong> The viewer only gives a square-on bounding box, so points placed from it would float above the element. Trace the element so the points follow its real top surface.</p>`;
+    const what = [lift.flags.sloped && "sloped or curved", lift.flags.skewed && "running diagonally in plan"].filter(Boolean).join(" and ");
+    $("liftResult").innerHTML = `<p class="warn-text"><strong>This load looks ${what}.</strong> Without its real shape the points would float above the steel, so they aren't drawn. Press <em>Load true geometry</em> (above) so the points sit on the real top surface, or use <em>Pick lifting points</em> to click them yourself.</p>`;
     return;
   }
   const { points, shares, slings: sl, layout, notes } = lift;
@@ -784,9 +673,7 @@ function renderLift() {
   for (const n of notes) msgs.push(`<p class="warn-text">${esc(n)}</p>`);
 
   $("liftResult").innerHTML = `
-    <div class="hint">${lift.axis === "geometry" ? `Placed on the real top surface of the steel, from the model's IFC (true geometry). Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread over the load" : layout === "line" ? "in a line along the load" : "single point over the COG"}.` : lift.layout === "picked" ? `${lift.points.length} point${lift.points.length > 1 ? "s" : ""} you picked on the model (on its surface). Hook directly above the centre of gravity.` : lift.axis === "traced"
-      ? `Following the traced element (${f(lift.length, 2)} m long, ${f(lift.slopeDeg, 1)}° slope${lift.curve === "curved" ? `, curved: top ${lift.rise > 0 ? "rises" : "dips"} ${f(Math.abs(lift.rise), 2)} m from a straight line` : ""}, traced from ${lift.tracePoints} points). Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread across its width" : layout === "line" ? "in a line along it" : "single point over COG"}.`
-      : `Layout: ${layout === "members" ? "on the members either side of the COG" : layout === "area" ? "spread over footprint" : layout === "line" ? `in a line along ${lift.axis.toUpperCase()}` : "single point over COG"}. Points sit on top of the element below them.`}</div>
+    <div class="hint">${layoutText(lift)}</div>
     <table class="lift">${head}${body}</table>
     ${sl ? `<p class="hint">*Angle from horizontal. Hook at ${f(sl.hook.x)}, ${f(sl.hook.y)}, ${f(sl.hook.z)} m. Tension excludes rigging weight and dynamic factors.</p>` : ""}
     ${msgs.join("")}`;
@@ -889,7 +776,7 @@ async function copyResult() {
   ];
   if (lift?.points) {
     const sl = lift.slings;
-    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout}${lift.axis === "traced" ? `, along traced element, ${lift.slopeDeg.toFixed(1)}° slope, ${lift.curve}, ${lift.tracePoints} trace points` : ""})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
+    lines.push("", `Lifting points (${lift.points.length}, ${lift.layout}${lift.axis === "geometry" ? ", true geometry" : ""})${lift.shares.stable ? "" : " – UNSTABLE: COG outside lifting points"}`,
       `Point\tX (m)\tY (m)\tZ (m)\tLoad (kg)${sl ? "\tSling (m)\tAngle from horizontal (°)\tTension (kg)" : ""}`,
       ...lift.points.map((p, i) => [p.label, p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3), lift.shares.kg[i].toFixed(1),
         ...(sl ? [sl.legs[i].length.toFixed(2), sl.legs[i].angleFromHorizontal.toFixed(0), sl.legs[i].tensionKg.toFixed(1)] : [])].join("\t")));
@@ -924,16 +811,11 @@ $("btnLiftClear").onclick = () => { liftVisible = false; drawnSig = null; clearL
 $("density").onchange = recalc;
 $("units").onchange = recalc;
 for (const id of ["nPoints", "layout", "hookHeight", "labels"]) $(id).onchange = recalc;
-$("btnTrace").onclick = () => startTrace().catch((e) => cancelTrace(esc(String(e)), "err-text small"));
-$("btnTrace").textContent = TRACE_LABEL;
-$("btnTraceMeasured").onclick = () => traceFromMeasurements().catch((e) => traceStatus(esc(String(e)), "err-text small"));
-$("btnTraceClear").onclick = clearTrace;
-$("btnPickLift").onclick = () => startPickLift().catch((e) => { cancelTrace(); pickStatus(esc(String(e)), "err-text small"); });
+$("btnPickLift").onclick = () => startPickLift().catch((e) => { stopPicking(); pickStatus(esc(String(e)), "err-text small"); });
 $("btnPickClear").onclick = clearPicked;
 $("btnGeo").onclick = () => loadGeometryFromConnect().catch((e) => geoStatus(esc(String(e.message || e)), "err-text small"));
-$("geoFile").onchange = (e) => loadGeometryFromFile(e.target.files?.[0]);
 $("btnRefresh").onclick = async () => {
-  if (picking) finishTrace();
+  if (picking) finishPicking();
   const sel = await API?.viewer.getSelection().catch(() => null);
   if (sel) queueSelection(sel, true);
 };

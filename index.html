@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Lift COG</title>
-  <link rel="stylesheet" href="style.css?v=2.0.1" />
+  <link rel="stylesheet" href="style.css?v=2.2.0" />
   <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
 </head>
 <body>
@@ -31,7 +31,6 @@
     <p class="hint">Use the model's real shape for the centre of gravity and lifting points, instead of bounding boxes. The IFC is read in this browser only – it isn't sent anywhere.</p>
     <div class="row">
       <button id="btnGeo" class="secondary">Load true geometry</button>
-      <label class="filebtn">Load IFC from computer<input type="file" id="geoFile" accept=".ifc" hidden /></label>
     </div>
     <div id="geoStatus" class="hint"></div>
   </section>
@@ -59,17 +58,8 @@
         </select>
       </label>
     </div>
-    <div class="trace" id="traceBox">
-      <div class="hint"><strong>Sloped, diagonal or curved element?</strong> Trace it so points sit on its real top surface: click near each end, and for curved elements also click points in between.</div>
-      <div class="row">
-        <button id="btnTrace" class="secondary">Trace element</button>
-        <button id="btnTraceMeasured" class="secondary">Use measured points</button>
-        <button id="btnTraceClear" class="link">Clear trace</button>
-      </div>
-      <div id="traceStatus" class="hint"></div>
-    </div>
     <div class="trace">
-      <div class="hint"><strong>Complex shape, or lifting lugs already designed?</strong> Click where each sling attaches – points always sit on the element and the loads are worked out for you.</div>
+      <div class="hint"><strong>Want to choose the points yourself</strong> (designed lugs, special rigging)? Click where each sling attaches – points sit on the element and the loads are worked out for you.</div>
       <div class="row">
         <button id="btnPickLift" class="secondary">Pick lifting points</button>
         <button id="btnPickClear" class="link">Clear picked points</button>
@@ -112,8 +102,8 @@
     <pre id="log"></pre>
   </section>
 
-  <script src="cog.js?v=2.0.1"></script>
-  <script src="geo.js?v=2.0.1"></script>
-  <script src="app.js?v=2.0.1"></script>
+  <script src="cog.js?v=2.2.0"></script>
+  <script src="geo.js?v=2.2.0"></script>
+  <script src="app.js?v=2.2.0"></script>
 </body>
 </html>

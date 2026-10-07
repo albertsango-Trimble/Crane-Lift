@@ -8,11 +8,9 @@ Works out the **combined centre of gravity (COG)** of the elements selected in t
 Trimble Connect only gives extensions each element's **bounding box**. That's fine for flat, square-on steel, but not for sloped, curved, cranked or open-frame loads. **Load true geometry** reads the model's own IFC, so the extension uses the **real shape**:
 - **True centre of gravity:** the volume centroid of each element's actual solid, weighted by its weight.
 - **Lifting points on real steel:** points are laid out with the rules below, then placed on the actual top surface. Any point over a gap is moved onto the nearest steel. If moving them breaks the balance, the pattern is drawn in until the load is balanced and stable.
-- **No tracing needed:** slopes, curves, arches and bent pieces are handled automatically, and the trace box is hidden.
+- **Slopes, curves, arches and bent pieces** are handled automatically.
 
-How it gets the IFC:
-1. **Load true geometry** asks once for permission to use your Trimble Connect sign-in (Connect shows a prompt). It then downloads the IFC behind the selected model straight from your project, from the project's own region.
-2. **Load IFC from computer** is the alternative: choose the IFC file and it is matched to the selection by element GUIDs. Use this if the download is blocked, or for a model you can't upload.
+How it gets the IFC: **Load true geometry** asks once for permission to use your Trimble Connect sign-in (Connect shows a prompt). It then downloads the IFC behind the selected model straight from your project, from the project's own region, and matches it to the selection by element GUIDs.
 
 **Privacy:** the IFC is read **in your browser only** (with the open-source [web-ifc](https://github.com/ThatOpen/engine_web-ifc) library). It is not uploaded anywhere. Only the library code is fetched from jsDelivr.
 
@@ -24,8 +22,8 @@ Limits: the model in Connect must be an **IFC** (not `.ifczip` or a native Tekla
 3. The panel shows the total weight and COG X / Y / Z in metres (model coordinates).
 4. **Show marker** places a pink **single point measurement** at the COG in the 3D view (the same markup as Measure → Single point, so it shows the coordinates and appears in the measurement list). **Clear marker** removes only that point, not your other measurements.
 5. **Lifting points:** choose 1, 2, 3, 4, 6 or 8 points and a layout, and blue single-point markups appear on top of the elements, labelled with the load each one carries. They update automatically when you change the selection or settings. **Hide lifting points** removes them.
-   - **Sloped, diagonal or curved elements** (rafters, raking beams, braces, cambered or vertically curved beams): the panel asks you to **trace** the element instead of drawing points in mid-air. Click **Trace element**, then click the top of the element near each end. The points update after the second click. **For a curved element, keep clicking points along the top** (at least one near the middle), then press **Finish trace**. If clicks aren't picked up, place **Measure → Single point** measurements along the top of the element and press **Use measured points**.
-   - **Complex shapes** (bent, cranked or built-up pieces) **or loads with designed lifting lugs:** click **Pick lifting points**, then click the element wherever a sling attaches. Each click snaps to the model surface, so every point is on the element, and the loads and stability update after each click. Press **Finish picking** when done. **Clear picked points** goes back to automatic placement. Picked points are remembered for each selection.
+   - **Sloped, diagonal or curved loads without true geometry:** a bounding box can't show where their top surface is, so the panel doesn't draw points in mid-air. It asks you to **Load true geometry** or to **Pick lifting points**.
+   - **Choosing the points yourself** (designed lifting lugs, special rigging): click **Pick lifting points**, then click the element wherever a sling attaches. Each click snaps to the model surface, so every point is on the element, and the loads and stability update after each click. Press **Finish picking** when done. **Clear picked points** goes back to automatic placement. Picked points are remembered for each selection.
 6. **Copy result** copies a summary, the per-element table and the lifting points (paste into Excel or the lift plan).
 
 ## How it calculates
@@ -49,9 +47,8 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - **4, 6, 8, 10, 12 points:** two rows either side of the COG (wide loads), or a line (narrow loads).
 - **Layout → Auto** spreads points over the footprint when the load is at least a quarter as wide as it is long; otherwise it puts them in a line. You can force either.
 - **Flat, square-on loads:** each point is dropped onto the **top of the element below it** (from its bounding box).
-- **Traced loads:** points follow the traced profile: its direction in plan and the height of the top surface. With 2 trace points the profile is a straight line. With 3 clicks it is a parabola (the shape of a road or bridge vertical curve; within about 3 cm of a circular arch). With 4 or more clicks it is a parabola if one fits within 1 cm, otherwise a smooth curve through every click. On the canopy arches, 6 clicks follow the real top within 12 mm. The line is moved sideways so it passes over the COG, so points stay symmetric and loads stay equal. Points are placed along the full member length, even if your clicks weren't right at the ends.
-- Each element is checked on its own: it is treated as sloped when its box is over 1 m tall and taller than 15% of its length, and as diagonal when its box is wide relative to its length. If any element is, points are not drawn until the load is traced. **Vertical elements** (columns, posts, hangers) and **minor parts** under 5% of the total weight are left out of this check, so a frame of columns and flat beams doesn't need tracing.
-- **Loads made of several parallel members** (frames, pairs of rafters, arched canopies, portal frames, ladders): when there are long members either side of the COG, the points go **on the members**, not in the gaps between them. This applies however many members are selected. The points are spread over as many members as the count allows, always including the two outermost, with the same number on each. For example, 3 arches: 4 points use the 2 outer arches and 6 points put 2 on each arch. 5 arches: 10 points put 2 on each. Members running in either plan direction are considered. For 2 points, or with **Along length**, a member running along the COG line is used instead. For traced loads, every member takes the traced profile, adjusted for any difference in height between members.
+- Each element is checked on its own: it is treated as sloped when its box is over 1 m tall and taller than 15% of its length, and as diagonal when its box is wide relative to its length. If any element is and true geometry isn't loaded, points are not drawn (load true geometry or pick the points). **Vertical elements** (columns, posts, hangers) and **minor parts** under 5% of the total weight are left out of this check, so a frame of columns and flat beams doesn't need tracing.
+- **Loads made of several parallel members** (frames, pairs of rafters, arched canopies, portal frames, ladders): when there are long members either side of the COG, the points go **on the members**, not in the gaps between them. This applies however many members are selected. The points are spread over as many members as the count allows, always including the two outermost, with the same number on each. For example, 3 arches: 4 points use the 2 outer arches and 6 points put 2 on each arch. 5 arches: 10 points put 2 on each. Members running in either plan direction are considered. For 2 points, or with **Along length**, a member running along the COG line is used instead.
 - A point that lands in a gap between elements is moved onto the nearest element, and the loads are recalculated from the actual positions.
 - **Load per point** is the most even split that keeps the load level (exact for 1, 2 and 3 points). With 4+ points, or 3+ in a line, the panel warns that equal shares assume a spreader beam or equalising rigging. Many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.
 - If the COG falls outside the lifting points, the panel shows **Unstable**.
@@ -61,13 +58,7 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - **Tekla:** add `WEIGHT_GROSS` and `COG_X/Y/Z` to the IFC export's property sets so both weight and true centre of gravity come through.
 - If the marker lands far away from the selection, change **Viewer coordinate units**.
 - If you select an assembly *and* its parts, it can be counted twice. Select one or the other and check the element list.
-- Untraced layouts follow the X or Y axis of the model. If a load is rotated in plan but not flagged, use **Trace element** anyway – it works for any straight member.
-- Trace along the **top** of the element. Points are placed at the height of the profile you trace.
-- Small offsets between your trace and the centre of gravity (for example, clicking a flange edge) are corrected automatically. If the centre of gravity is well to the side of the traced line and no member runs under it, the panel does not draw points in empty space. It asks you to use **Pick lifting points** instead.
 - The extension only sees each element's bounding box and the points you click, not its true shape. For anything a box describes poorly, **Pick lifting points** is the reliable option.
-- For curved elements, click near both ends and at least once in the middle. Points beyond your outermost clicks have their height extrapolated, and the panel says so.
-- The trace is straight in plan. Elements curved in plan (horizontal curves) aren't supported yet.
-- For a curved element without a COG property, the COG is the centre of its bounding box. That is close for symmetric curves but not exact.
 - Lifting accessories (spreader bars, slings, shackles) are not in the model. Add their weight to the lift plan separately.
 
 ## Files
