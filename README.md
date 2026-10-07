@@ -35,8 +35,8 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 - **Layout → Auto** spreads points over the footprint when the load is at least a quarter as wide as it is long; otherwise it puts them in a line. You can force either.
 - **Flat, square-on loads:** each point is dropped onto the **top of the element below it** (from its bounding box).
 - **Traced loads:** points follow the traced profile: its direction in plan and the height of the top surface. With 2 trace points the profile is a straight line. With 3 or more it is a parabola (the shape of a road or bridge vertical curve). If a parabola doesn't fit within 3 cm, it runs straight between your clicks instead. The line is moved sideways so it passes over the COG, so points stay symmetric and loads stay equal. Points are placed along the full member length, even if your clicks weren't right at the ends.
-- An element is treated as sloped when its box is over 1 m tall and taller than 15% of its length, and as diagonal when its box is wide relative to its length. In those cases points are not drawn until it is traced.
-- **Open-centre loads** (frames, pairs of rafters, ladders): when no member runs along the COG line, the points go on the **two outer long members either side of the COG**, not in the open space between them. 4, 6 and 8 points are split evenly between the two members. With 2 points, there is one on each member across the COG; the panel warns that the load can tip end to end. With 3 points, there are 2 on the nearer member and 1 on the other. For traced loads, every member takes the traced profile, adjusted for any difference in height between members.
+- Each element is checked on its own: it is treated as sloped when its box is over 1 m tall and taller than 15% of its length, and as diagonal when its box is wide relative to its length. If any element is, points are not drawn until the load is traced. **Vertical elements** (columns, posts, hangers) and **minor parts** under 5% of the total weight are left out of this check, so a frame of columns and flat beams doesn't need tracing.
+- **Open-centre loads** (frames, pairs of rafters, ladders, portal frames): when no member runs along the COG line, the points go on the **two outer long members either side of the COG**. Members running in either plan direction are considered, and the pair furthest apart is used. Points are not in the open space between them. 4, 6 and 8 points are split evenly between the two members. With 2 points, there is one on each member across the COG; the panel warns that the load can tip end to end. With 3 points, there are 2 on the nearer member and 1 on the other. For traced loads, every member takes the traced profile, adjusted for any difference in height between members.
 - A point that lands in a gap between elements is moved onto the nearest element, and the loads are recalculated from the actual positions.
 - **Load per point** is the most even split that keeps the load level (exact for 1, 2 and 3 points). With 4+ points, or 3+ in a line, the panel warns that equal shares assume a spreader beam or equalising rigging. Many rigging guides rate a 4-leg sling as if only 2 or 3 legs carry the load.
 - If the COG falls outside the lifting points, the panel shows **Unstable**.
@@ -61,7 +61,7 @@ Combined COG = Σ(mᵢ · cᵢ) / Σmᵢ
 | `app.js` | Viewer wiring (selection, properties, bounding boxes, markups) |
 | `cog.js` | Pure COG and lifting-point maths, no viewer dependency |
 | `test-cog.js` | `node test-cog.js` – unit tests for the COG and lifting-point maths |
-| `test-frame.js`, `test-frame.json` | `node test-frame.js` – tests against the curved-rafter frame from `ARV_Sample_1.ifc` (real geometry) |
+| `test-frame.js`, `test-frame.json` | `node test-frame.js` – tests against the curved-rafter frame and the portal frame (columns + top beams) from `ARV_Sample_1.ifc` (real geometry) |
 | `lift.svg`, `icon.svg` | Fallback lifting-point icon, panel icon |
 
 ## Deploy
